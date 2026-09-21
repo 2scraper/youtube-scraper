@@ -176,13 +176,18 @@ class _BrowserSession:
     """
 
     def __init__(self, browser, context, page, proxy_url: Optional[str],
-                 client_version: str, user_agent: Optional[str]):
+                 client_version: str, user_agent: Optional[str],
+                 owns_context: bool = True):
         self.browser = browser
         self.context = context
         self.page = page
         self.proxy_url = proxy_url
         self.client_version = client_version
         self.user_agent = user_agent
+        # False when we adopted the remote browser's existing context
+        # instead of creating one. Closing a context we did not create
+        # ends a session somebody else's run may still be using.
+        self.owns_context = owns_context
 
     # -- transport ---------------------------------------------------------
     #
@@ -257,11 +262,23 @@ class _BrowserSession:
             return ""
 
     def close(self):
-        for closer in (self.context, self.browser):
+        """Close what this session created, and nothing else.
+
+        `browser.close()` on a `connect_over_cdp` browser disconnects
+        rather than shutting the remote one down, so it is safe either
+        way. The CONTEXT is not: over CDP we adopt the one the remote
+        browser already has, and closing it ends a session that is not
+        ours to end.
+        """
+        if self.owns_context:
             try:
-                closer.close()
+                self.context.close()
             except Exception:
                 pass
+        try:
+            self.browser.close()
+        except Exception:
+            pass
 
 
 class _TransportError(RuntimeError):
@@ -316,16 +333,44 @@ def _connect_remote(pw, args) -> _BrowserSession:
     rather than better cover (CLAUDE.md §8). The engine refuses those
     combinations in `parse_args` rather than quietly dropping them.
     """
-    try:
-        browser = pw.chromium.connect_over_cdp(args.cdp_endpoint,
-                                               timeout=NAVIGATION_TIMEOUT_MS)
-    except PWError as exc:
-        raise PWError(f"could not connect to --cdp-endpoint: "
-                      f"{_mask_credentials(exc)}") from exc
-    context = browser.contexts[0] if browser.contexts else browser.new_context()
+    # The upgrade is RETRIED, because a rejection here is usually the
+    # service rather than the request. Measured 2026-09-21 against a live
+    # Scraping Browser endpoint: three raw WebSocket upgrades seconds
+    # apart gave `HTTP 500` instantly on the first and connected on the
+    # other two. Un-retried, that is exit 5 on roughly a third of runs for
+    # a condition that clears by itself — and CLAUDE.md §20 names it: a
+    # managed browser answering 500 on the upgrade is the SERVICE failing
+    # to raise its own exit, not this code.
+    #
+    # Deliberately NOT the same thing as a dead proxy (§8). There is no
+    # other exit to move to here, so the right response is to ask the same
+    # endpoint again after a moment rather than to rotate.
+    browser = None
+    attempts = max(1, int(getattr(args, "retries", 2)) + 1)
+    for attempt in range(1, attempts + 1):
+        try:
+            browser = pw.chromium.connect_over_cdp(
+                args.cdp_endpoint, timeout=NAVIGATION_TIMEOUT_MS)
+            break
+        except PWError as exc:
+            text = _mask_credentials(exc)
+            if attempt >= attempts or "profile_locked" in text:
+                # `profile_locked` is not transient: another run holds
+                # this pid, and asking again cannot help.
+                raise PWError(f"could not connect to --cdp-endpoint: "
+                              f"{text}") from exc
+            logger.warning("Scraping Browser refused the WebSocket upgrade "
+                           "(%s) — attempt %d/%d, retrying in %.1fs. This is "
+                           "usually the service, not the request.",
+                           text.strip()[:120], attempt, attempts,
+                           args.retry_delay)
+            time.sleep(args.retry_delay)
+    adopted = bool(browser.contexts)
+    context = browser.contexts[0] if adopted else browser.new_context()
     page = context.pages[0] if context.pages else context.new_page()
     return _BrowserSession(browser, context, page, None,
-                           FALLBACK_CLIENT_VERSION, None)
+                           FALLBACK_CLIENT_VERSION, None,
+                           owns_context=not adopted)
 
 
 def _open_session(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:

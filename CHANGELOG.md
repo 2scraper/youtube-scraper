@@ -63,6 +63,15 @@ client, reading YouTube through the endpoint its own front end calls.
   `networkidle` wait returns 1.39 MB with zero comments. Control: a
   deliberately wrong key answered 401 in 0.1 s against the real key's 200
   in 6.7 s.
+- **The Scraping Browser path is live-verified**, on Playwright and
+  pyppeteer (Selenium cannot reach an authenticated CDP endpoint and
+  refuses it by name). A US profile returned comments, video metadata and
+  search normally on 2026-09-21. Its WebSocket upgrade answered `HTTP 500`
+  on one of three attempts seconds apart, so both engines now retry it —
+  and its auto-solve extension injects `cf-turnstile` and fifteen other
+  captcha markers into pages the site served normally, which is why none
+  of them is in this repo's block-marker set and why a fixture cut from
+  such a page is now in the suite.
 - **No challenge has ever been rendered to this scraper**, and the served
   page's own greps mislead: `recaptcha` appears once, in a CSS rule that
   hides a badge, and `botguard` thirteen times, all of them configuration

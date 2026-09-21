@@ -2198,6 +2198,64 @@ def check_the_sample_share_says_how_small_a_run_is():
     equal("and no division by zero", page_flow.sample_share(10, 0), None)
 
 
+def check_the_scraping_browsers_own_extension_does_not_read_as_a_challenge():
+    """The marker check, run against a page fetched the way a paid run
+    fetches — which is the only place this trap can appear.
+
+    CLAUDE.md §21 records a guard that passed for the WRONG REASON: it ran
+    only against captures taken with a plain HTTP client, which carry no
+    extension injection at all. Every other fixture in this repo is such a
+    capture. This one is a page YouTube SERVED, pulled over the 2Captcha
+    Scraping Browser, and its auto-solve extension injected sixteen script
+    tags into it.
+
+    Counted on it 2026-09-21 — and every line is a marker some repo in
+    this family has carried at some point:
+
+        chrome-extension://          16
+        hunter.js                     4
+        cf-turnstile                  1     <- the trap
+        cf-turnstile-response         1
+        data-ts-input                 1
+        challenges.cloudflare.com     0
+
+    So `cf-turnstile` would report a blocked run on every good page over
+    `--cdp-endpoint`, exactly as it did in a sibling repo on a 1.8 MB page
+    holding a full catalogue. This repo does not carry it, and this check
+    is what keeps that true rather than accidental.
+    """
+    html = FIX.get("cdp_served_watch")
+    check("the CDP-served fixture is present", bool(html),
+          "run make_fixtures.py with a capture taken over --cdp-endpoint")
+    if not html:
+        return
+
+    # First: the fixture really is the one that can catch this. A check
+    # whose input lost the thing it tests for passes silently.
+    equal("the fixture still carries the extension's turnstile hunter",
+          html.count("cf-turnstile"), 1)
+    check("...and its injected script tags",
+          html.count("chrome-extension://") >= 10,
+          str(html.count("chrome-extension://")))
+
+    # Then: nothing in our set fires on it.
+    equal("no marker fires on a page served over the Scraping Browser",
+          product_parser.detect_bot_challenge(html), None)
+    equal("...and it classifies as served, not blocked",
+          page_flow.counts_as_blocked(
+              product_parser.detect_page_state(html)), False)
+
+    # And the specific strings, named, so re-adding one fails HERE with
+    # the reason rather than on someone's bill.
+    markers = " ".join(product_parser.BOT_CHALLENGE_MARKERS)
+    for injected in ("cf-turnstile", "hunter.js", "data-ts-input",
+                     "chrome-extension://"):
+        check("%r is injected by the extension and is not a marker"
+              % injected,
+              injected not in markers,
+              "it appears on pages YouTube serves normally")
+
+
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")
           and callable(v) and k != "check"]
 

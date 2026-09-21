@@ -88,6 +88,17 @@ SOURCES = {
     "search": ("search_en.json", 5),
 }
 
+# HTML rather than a payload, and the only one. It is a page YouTube
+# SERVED, fetched over the 2Captcha Scraping Browser, trimmed to the tags
+# that browser's auto-solve EXTENSION injected into it.
+#
+# It exists because CLAUDE.md §21 records a guard that passed for the
+# wrong reason: a marker check run only against captures taken with plain
+# curl, which carry no injection at all. Every fixture above was fetched
+# that way. This one is fetched the way a `--cdp-endpoint` run fetches,
+# which is the only place the trap can appear.
+HTML_SOURCES = {"cdp_served_watch": "cdp_served_watch.html"}
+
 # Columns this script deliberately rewrites. The parse-identity check below
 # compares every OTHER column between the original and the fixture, so this
 # list is the exact boundary of what is not verbatim — and shrinking it by
@@ -625,6 +636,24 @@ def main() -> int:
         out[name] = fixture
         print(f"  {name:22} {len(json.dumps(fixture)):8,} bytes, "
               f"{rows:3} row(s) verified identical")
+
+    for name, filename in HTML_SOURCES.items():
+        path = captures / filename
+        if not path.is_file():
+            print(f"  SKIP {name}: {path} not found")
+            continue
+        html = path.read_text(encoding="utf-8")
+        # Nothing to anonymise: it carries no comment, no author and no
+        # session — only the extension's own script tags. Asserted rather
+        # than assumed, because "nothing to scrub" is exactly the sentence
+        # that stops being true when someone re-cuts the capture.
+        for leak in ('"commentId"', '"displayName"', '"visitorData"',
+                     "ggpht.com/ytc"):
+            if leak in html:
+                raise SystemExit(f"{name}: carries {leak!r} — re-trim it")
+        out[name] = html
+        print(f"  {name:22} {len(html):8,} bytes, "
+              f"{html.count('chrome-extension://'):2} injected tag(s)")
 
     target = pathlib.Path(__file__).resolve().parent / "fixtures_generated.json"
     target.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")

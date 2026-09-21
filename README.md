@@ -235,6 +235,26 @@ put a password. The engine refuses `--cdp-endpoint` with that reason
 instead of failing later. Selenium also cannot authenticate a `--proxy` at
 all: the credentials are stripped and a warning is printed.
 
+**The Scraping Browser (`--cdp-endpoint`) works, on the two engines that
+can reach it.** Measured 2026-09-21 against a live US profile: comments,
+video metadata and search all returned normally, and a page YouTube served
+came back at 2.1 MB against 1.36 MB locally. Two things about that path are
+worth knowing before you use it:
+
+- **A rejected WebSocket upgrade is usually the service, not you.** Three
+  raw upgrades to the same endpoint seconds apart: `HTTP 500` instantly on
+  the first, connected on the other two. The engines now retry the upgrade
+  (`--retries`), because un-retried that is a failed run about a third of
+  the time for a condition that clears by itself. `profile_locked` is the
+  exception and is not retried — another run holds that `pid`.
+- **The auto-solve extension injects captcha markers into every page it
+  loads**, including pages that were served perfectly normally. Counted on
+  one: `chrome-extension://` 16, `hunter.js` 4, `cf-turnstile` 1,
+  `data-ts-input` 1. This repo carries none of those as block markers, and
+  a fixture cut from that exact page is in the offline suite so it stays
+  that way — a scraper that trusted `cf-turnstile` would report every good
+  page over this path as blocked.
+
 **The Scraper API path cannot read comments on this site, and that is a
 fact about YouTube.** The service renders a page and returns its HTML;
 YouTube renders no comments into its HTML and fetches them over a POST the
