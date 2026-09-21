@@ -334,11 +334,12 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
         options.add_argument(f"--proxy-server={host_only}")
 
     user_agent = None
+    fingerprint = None
     if args.fingerprint:
         from fingerprint_client import get_fingerprint, fingerprint_user_agent
-        fp = get_fingerprint(args.twocaptcha_key, tags=args.fp_tags,
-                             country=args.fp_country)
-        user_agent = fingerprint_user_agent(fp)
+        fingerprint = get_fingerprint(args.twocaptcha_key, tags=args.fp_tags,
+                                      country=args.fp_country)
+        user_agent = fingerprint_user_agent(fingerprint)
     if user_agent:
         options.add_argument(f"--user-agent={user_agent}")
 
@@ -346,8 +347,58 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
     if not user_agent:
         version = (driver.capabilities or {}).get("browserVersion", "")
         user_agent = _chrome_ua(version)
+    if fingerprint is not None:
+        _apply_fingerprint(driver, fingerprint, user_agent)
     return _BrowserSession(driver, proxy_url, FALLBACK_CLIENT_VERSION,
                            user_agent)
+
+
+def _apply_fingerprint(driver, fingerprint, user_agent) -> None:
+    """Give the identity everything the fingerprint states, not just a UA.
+
+    `--user-agent=` on the command line is a BARE override: it changes
+    `navigator.userAgent` and leaves `navigator.userAgentData` and the
+    `Sec-CH-UA` header reporting the real browser. CLAUDE.md §24 measured
+    that half-identity being refused where a complete one was served, so
+    this engine applies the same set its twins do.
+
+    Best effort throughout — a fingerprint is cover, and no run should die
+    because cover was imperfect.
+    """
+    from fingerprint_client import (user_agent_metadata, accept_language,
+                                    playwright_init_script)
+
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument",
+                               {"source": playwright_init_script(fingerprint)})
+    except DriverError as exc:
+        logger.warning("Could not install the fingerprint's init script: %s",
+                       _mask_credentials(exc))
+
+    metadata = user_agent_metadata(fingerprint)
+    if not metadata:
+        logger.warning("The fingerprint carried no brand list, so its client "
+                       "hints are left alone: a HALF identity is worse than "
+                       "none (CLAUDE.md §24).")
+        return
+    payload = {"userAgent": user_agent, "userAgentMetadata": metadata}
+    language = accept_language(fingerprint)
+    if language:
+        payload["acceptLanguage"] = language
+    platform = (fingerprint.get("navigator") or {}).get("platform")
+    if platform:
+        payload["platform"] = platform
+    try:
+        driver.execute_cdp_cmd("Network.setUserAgentOverride", payload)
+        timezone = (fingerprint.get("intl") or {}).get("timeZone")
+        if timezone:
+            driver.execute_cdp_cmd("Emulation.setTimezoneOverride",
+                                   {"timezoneId": timezone})
+    except DriverError as exc:
+        logger.warning("Could not apply the fingerprint's client hints (%s) — "
+                       "the run continues, but navigator.userAgentData will "
+                       "disagree with the user agent.",
+                       _mask_credentials(exc))
 
 
 def _connect_remote(pw, args) -> _BrowserSession:
@@ -472,10 +523,25 @@ def handle_captcha_if_present(session: _BrowserSession, args,
         return False
     if not budget.spend():
         return False
+    if args.cdp_endpoint:
+        # The token is MINTED over plain HTTPS from this machine and then
+        # installed into a browser that is somewhere else entirely. A
+        # Scraping Browser endpoint carries a `country-` segment, so the
+        # solve can be issued on one continent and replayed from another —
+        # and a token a challenge issuer binds to the solving address is
+        # then worthless on arrival. Said out loud rather than left to be
+        # discovered from a bill: nothing here can fix it, and the remedy
+        # is the endpoint's own auto-solve (`Captcha.setAutoSolve`), which
+        # runs where the browser is.
+        logger.warning("Solving over --cdp-endpoint mints the token from "
+                       "THIS machine and installs it into a remote browser, "
+                       "so it may be issued on a different exit than the one "
+                       "that will use it. If the token is refused, that is "
+                       "the likeliest reason.")
     try:
         token = solve_recaptcha(challenge, args.twocaptcha_key,
                                 min_score=args.min_score,
-                                api=args.captcha_api)
+                                api_version=args.captcha_api)
     except CaptchaUnsolvable as exc:
         logger.warning("Captcha not solved: %s", _mask_credentials(exc))
         return False

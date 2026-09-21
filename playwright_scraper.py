@@ -307,22 +307,80 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
         "viewport": {"width": 1366, "height": 900},
     }
     user_agent = None
+    fingerprint = None
     if args.fingerprint:
         from fingerprint_client import (get_fingerprint, fingerprint_user_agent,
-                                        playwright_context_kwargs)
-        fp = get_fingerprint(args.twocaptcha_key, tags=args.fp_tags,
-                             country=args.fp_country)
-        context_kwargs.update(playwright_context_kwargs(fp))
-        user_agent = fingerprint_user_agent(fp)
+                                        playwright_context_kwargs,
+                                        playwright_init_script)
+        fingerprint = get_fingerprint(args.twocaptcha_key, tags=args.fp_tags,
+                                      country=args.fp_country)
+        context_kwargs.update(playwright_context_kwargs(fingerprint))
+        user_agent = fingerprint_user_agent(fingerprint)
     if not user_agent:
         user_agent = _chrome_ua(browser.version)
     context_kwargs["user_agent"] = user_agent
 
     context = browser.new_context(**context_kwargs)
     context.set_default_timeout(REQUEST_TIMEOUT_MS)
+    if fingerprint is not None:
+        context.add_init_script(playwright_init_script(fingerprint))
     page = context.new_page()
+    if fingerprint is not None:
+        _apply_client_hints(context, page, fingerprint, user_agent)
     return _BrowserSession(browser, context, page, proxy_url,
                            FALLBACK_CLIENT_VERSION, user_agent)
+
+
+def _apply_client_hints(context, page, fingerprint, user_agent) -> None:
+    """Give the identity its User-Agent Client Hints, with the user agent.
+
+    `user_agent=` on a context sets `navigator.userAgent` and leaves
+    `navigator.userAgentData` reporting the REAL browser. Measured
+    2026-09-21 by reading both back out of a live page: the UA said
+    `Chrome/150` while the brands said `HeadlessChrome/153`. That is a
+    contradiction rather than cover, and it is the half-identity CLAUDE.md
+    §24 measured being refused where a complete one was served.
+
+    Applied TOGETHER with the user agent and never alone, for the same
+    reason: a bare override is the thing that failed there.
+
+    Best effort. If the protocol call is refused, the run continues with
+    the identity it has and says so — a fingerprint is cover, and no run
+    should die because cover was imperfect.
+    """
+    from fingerprint_client import user_agent_metadata, accept_language
+
+    metadata = user_agent_metadata(fingerprint)
+    if not metadata:
+        logger.warning("The fingerprint carried no brand list, so its client "
+                       "hints are left alone: a HALF identity is worse than "
+                       "none (CLAUDE.md §24).")
+        return
+    payload = {"userAgent": user_agent, "userAgentMetadata": metadata}
+    language = accept_language(fingerprint)
+    if language:
+        payload["acceptLanguage"] = language
+    platform = metadata.get("platform")
+    if platform:
+        payload["platform"] = (fingerprint.get("navigator") or {}).get(
+            "platform") or platform
+    try:
+        session = context.new_cdp_session(page)
+        session.send("Network.setUserAgentOverride", payload)
+        # NOT detached, and that is the whole of it. Detaching the session
+        # REVERTS the override: measured 2026-09-21, a run that detached
+        # reported `HeadlessChrome/153` in the brands while one that kept
+        # the session reported the fingerprint's `Google Chrome/150`. The
+        # call succeeded either way, so this failed silently in exactly the
+        # way CLAUDE.md §16 describes — the tool doing less than it says
+        # while reporting success. The session is parked on the page so it
+        # lives as long as the browser does.
+        page._2captcha_cdp_session = session
+    except PWError as exc:
+        logger.warning("Could not apply the fingerprint's client hints (%s) — "
+                       "the run continues, but navigator.userAgentData will "
+                       "disagree with the user agent.",
+                       _mask_credentials(exc))
 
 
 def _connect_remote(pw, args) -> _BrowserSession:
@@ -479,10 +537,25 @@ def handle_captcha_if_present(session: _BrowserSession, args,
         return False
     if not budget.spend():
         return False
+    if args.cdp_endpoint:
+        # The token is MINTED over plain HTTPS from this machine and then
+        # installed into a browser that is somewhere else entirely. A
+        # Scraping Browser endpoint carries a `country-` segment, so the
+        # solve can be issued on one continent and replayed from another —
+        # and a token a challenge issuer binds to the solving address is
+        # then worthless on arrival. Said out loud rather than left to be
+        # discovered from a bill: nothing here can fix it, and the remedy
+        # is the endpoint's own auto-solve (`Captcha.setAutoSolve`), which
+        # runs where the browser is.
+        logger.warning("Solving over --cdp-endpoint mints the token from "
+                       "THIS machine and installs it into a remote browser, "
+                       "so it may be issued on a different exit than the one "
+                       "that will use it. If the token is refused, that is "
+                       "the likeliest reason.")
     try:
         token = solve_recaptcha(challenge, args.twocaptcha_key,
                                 min_score=args.min_score,
-                                api=args.captcha_api)
+                                api_version=args.captcha_api)
     except CaptchaUnsolvable as exc:
         logger.warning("Captcha not solved: %s", _mask_credentials(exc))
         return False
