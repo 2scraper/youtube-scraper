@@ -1,0 +1,282 @@
+# Real runs against youtube.com. tests.yml (deliberately) never touches the
+# site, a credential or a paid product; everything that does is here.
+#
+# WHY THIS CANARY IS NOT GATED ON A SECRET
+# ----------------------------------------
+# CLAUDE.md §11 says a canary that cannot pass must SKIP rather than fail,
+# because a check that is always red teaches everyone to ignore checks. The
+# other half of that rule is §21's: a canary that CAN pass without a
+# credential should never be gated on one.
+#
+# This repo is the second case. Its central README claim is that YouTube's
+# comment endpoint answers a bare datacentre address with no key, no proxy
+# and no account — measured 2026-09-21 as 60 consecutive pages and 1,200
+# comments with no refusal. A GitHub runner is a bare datacentre address.
+# So this job runs a real three-page scrape every morning and is EXPECTED
+# to be green, and if YouTube ever puts that endpoint behind a key or a
+# challenge, the badge goes red the next day and the claim is retested
+# without anyone having to remember to.
+#
+# The paid path is the one that skips: `scraper-api` needs TWOCAPTCHA_KEY
+# and says so with a ::notice:: when it is absent.
+name: canary
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  comments:
+    name: a real three-page comment scrape, with no credentials at all
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          python -m playwright install --with-deps chromium
+
+      # >=3 pages, because with one page pagination is never exercised —
+      # which is exactly how a silent single-page bug survived in a sibling
+      # repo, reporting a complete-looking success holding a third of the
+      # data (CLAUDE.md §11).
+      - name: Scrape three pages of comments
+        id: run
+        run: |
+          set +e   # GitHub runs `run:` under `bash -e`, and a non-zero exit
+                   # would abort the step BEFORE the echo below.
+          python playwright_scraper.py \
+            --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --pages 3 --format both --out canary_comments --dump-html
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Interpret the result
+        run: |
+          python - <<'PY'
+          import json, os, sys
+
+          code = int("${{ steps.run.outputs.exit_code }}")
+          if code != 0:
+              meaning = {1: "crash", 2: "bad usage",
+                         3: "BLOCKED — the endpoint refused a datacentre "
+                            "address, which is the README's central claim "
+                            "failing",
+                         4: "no comments", 5: "remote API error",
+                         6: "partial"}.get(code, "unknown")
+              sys.exit(f"::error::exit {code} ({meaning})")
+
+          meta = json.load(open("canary_comments.meta.json"))
+          rows = json.load(open("canary_comments.json"))
+          fail = []
+
+          if meta["status"] != "complete":
+              fail.append(f"status is {meta['status']!r}, not 'complete'")
+          if meta["pages_completed"] < 3:
+              fail.append(f"only {meta['pages_completed']} page(s) completed "
+                          f"— pagination stopped early, which is the failure "
+                          f"a one-page canary cannot see")
+          # 20 per page is what the site serves, measured over 60
+          # consecutive pages. A floor rather than an equality: a short
+          # page at the end of a thread is legitimate, twenty missing
+          # comments are not.
+          if len(rows) < 55:
+              fail.append(f"{len(rows)} rows from 3 pages; expected ~60")
+
+          # Value floors, not coverage. A column can be 100% populated and
+          # entirely wrong (CLAUDE.md §10).
+          with_text = sum(1 for r in rows if (r.get("text") or "").strip())
+          if with_text < len(rows) * 0.95:
+              fail.append(f"only {with_text}/{len(rows)} rows carry text")
+          with_author = sum(1 for r in rows
+                            if (r.get("author_name") or "").startswith("@"))
+          if with_author < len(rows) * 0.95:
+              fail.append(f"only {with_author}/{len(rows)} rows name an author")
+          # Every count must come with the string the site actually wrote.
+          unpaired = [r["sku"] for r in rows
+                      if r.get("like_count") is not None
+                      and not r.get("like_count_text")]
+          if unpaired:
+              fail.append(f"{len(unpaired)} row(s) carry a like_count with no "
+                          f"like_count_text beside it")
+          # And no row may claim a precision it does not have.
+          bad_dates = [r["sku"] for r in rows
+                       if r.get("published_at_approx")
+                       and not r.get("published_at_precision")]
+          if bad_dates:
+              fail.append(f"{len(bad_dates)} row(s) carry a derived date with "
+                          f"no precision column")
+          # page+position must be unique across a multi-page run, or the
+          # column is worthless.
+          pairs = [(r.get("page"), r.get("position")) for r in rows]
+          if len(set(pairs)) != len(pairs):
+              fail.append("page+position is not unique across the run")
+          # The site's own total must have reached the sidecar.
+          if not meta.get("total_comments"):
+              fail.append("the sidecar carries no total_comments — the "
+                          "comment section header was not read")
+
+          if fail:
+              for line in fail:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print(f"::notice::{len(rows)} comments over "
+                f"{meta['pages_completed']} pages; the video states "
+                f"{meta['total_comments']:,} in total "
+                f"({meta.get('sample_share_pct')}%). No key, no proxy, no "
+                f"account.")
+          PY
+
+      - name: Diff two runs of the same ordering
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --pages 3 --out canary_comments_b
+          python diff_runs.py --old canary_comments.json \
+                              --new canary_comments_b.json
+          echo "diff exit: $?"
+
+      - name: The edge states still answer the way they are documented to
+        run: |
+          set +e
+          # Comments turned off, and a video that does not exist. Both
+          # answer HTTP 200 with a healthy-looking payload, and both must
+          # come back as exit 4 rather than exit 3 — reporting either as
+          # blocked sends a user rotating proxies over a video that simply
+          # has its comments switched off.
+          python playwright_scraper.py --url J38Yq85ZoyY --out canary_off
+          off=$?
+          python playwright_scraper.py --url aaaaaaaaaaa --out canary_gone
+          gone=$?
+          echo "comments-off exit $off, unavailable exit $gone"
+          if [ "$off" != "4" ] || [ "$gone" != "4" ]; then
+            echo "::error::expected exit 4 from both; got $off and $gone"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-comments
+          path: |
+            canary_comments*.json
+            canary_comments*.csv
+
+  video:
+    name: one video's metadata, including the exact upload date
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install the core and the Playwright engine
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          python -m playwright install --with-deps chromium
+      # `set +e` so the exit code can be captured, and then CHECKED — a
+      # captured code nothing reads is the same defect as a swallowed one.
+      - name: Read the video row
+        run: |
+          set +e
+          python playwright_scraper.py --url dQw4w9WgXcQ --mode video \
+            --out canary_video
+          code=$?
+          echo "playwright_scraper --mode video exit $code"
+          [ "$code" = "0" ] || { echo "::error::exit $code"; exit 1; }
+      - name: The asymmetry this mode exists for
+        run: |
+          python - <<'PY'
+          import json, sys
+          row = json.load(open("canary_video.json"))[0]
+          fail = []
+          # These four come from /player and are the whole reason this mode
+          # makes two calls. If any goes null, that endpoint changed.
+          for field in ("published_at", "duration_seconds", "category"):
+              if not row.get(field):
+                  fail.append(f"{field} is null — /player stopped answering")
+          # And these are the EXACT figures a comment row cannot have.
+          if not row.get("view_count") or row["view_count"] < 1_000_000_000:
+              fail.append(f"view_count {row.get('view_count')!r} is not the "
+                          f"exact figure the watch page states")
+          if not row.get("like_count"):
+              fail.append("like_count is null — the a11y label changed")
+          if row.get("comments_enabled") is not True:
+              fail.append("comments_enabled is not True on a video that "
+                          "plainly takes comments")
+          if fail:
+              for line in fail:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print(f"::notice::{row['title'][:50]} — published {row['published_at']}, "
+                f"{row['view_count']:,} views, {row['like_count']:,} likes")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-video
+          path: canary_video*.json
+
+  scraper-api:
+    name: the paid path (skips without a key)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # `secrets` is not available in a job-level `if`, so presence is tested
+    # through job `env` and read in each step's `if` (CLAUDE.md §11).
+    env:
+      HAVE_KEY: ${{ secrets.TWOCAPTCHA_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Say why this is skipped
+        if: env.HAVE_KEY != 'true'
+        run: |
+          echo "::notice::TWOCAPTCHA_KEY is not set, so the Scraper API path "\
+               "is skipped. Nothing else in this workflow needs it: the "\
+               "comment endpoint this repo reads is ungated."
+      - name: Install the core
+        if: env.HAVE_KEY == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Read a video through the Scraper API
+        if: env.HAVE_KEY == 'true'
+        env:
+          # Through the ENVIRONMENT, never a command line: env_config.py
+          # already reads exactly this name, and an unset secret arrives as
+          # an empty string which the loader treats as unset (CLAUDE.md §11).
+          TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
+        run: |
+          set +e
+          python scraper_api_client.py --url dQw4w9WgXcQ --out canary_sapi
+          code=$?
+          echo "scraper_api_client exit $code"
+          [ "$code" = "0" ] || exit 1
+          python - <<'PY'
+          import json
+          row = json.load(open("canary_sapi.json"))[0]
+          assert row["sku"] == "dQw4w9WgXcQ", row["sku"]
+          assert row["view_count"], "no view count came through"
+          # And the documented limit: this path cannot fill the /player
+          # columns, because that endpoint is a POST the service does not
+          # make. Pinned so that the README stops being true loudly.
+          assert row["published_at"] is None, (
+              "published_at is populated on the Scraper API path — the "
+              "README says it cannot be, and one of the two is now wrong")
+          print("::notice::Scraper API read the video row; /player columns "
+                "are null, as documented.")
+          PY
