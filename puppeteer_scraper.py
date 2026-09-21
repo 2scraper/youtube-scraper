@@ -94,6 +94,10 @@ DEFAULT_MODE = "comments"
 # goes through `_Loop.run(..., timeout=…)`.
 REQUEST_TIMEOUT_MS = 30_000
 NAVIGATION_TIMEOUT_MS = 60_000
+# A WebSocket upgrade either happens in a second or two or it has been
+# refused — measured at 1.4-1.6s for a success and 0.0s for a rejection.
+# Waiting 90s for it only delays the error by 90 seconds.
+CDP_CONNECT_TIMEOUT = 30
 
 # How many comments a `--pages N` run expects, used only to make the
 # closing log honest about what N meant.
@@ -167,6 +171,10 @@ def _proxy_failure(exc: Exception) -> str:
 class _Loop:
     """One event loop on a background thread, with enforced timeouts.
 
+    `last_error` is class-level on purpose: the exception that explains a
+    failed connect arrives on the loop's exception handler rather than on
+    the awaited coroutine, so the two have to meet somewhere.
+
     The shared policy in `page_flow` is written against plain synchronous
     callables, which is the right shape for two of the three drivers.
     Bridging here keeps that policy in one place rather than growing an
@@ -176,6 +184,8 @@ class _Loop:
     an explicit timeout. `.result(timeout)` returns control even when the
     browser never answers, which pyppeteer's own API does not offer.
     """
+
+    last_error = None
 
     def __init__(self):
         self.loop = asyncio.new_event_loop()
@@ -199,10 +209,24 @@ class _Loop:
         # faults under a successful-looking run.
         message = " | ".join(str(context.get(k)) for k in
                              ("exception", "message") if context.get(k))
+        # Remembered, not just filtered. When the CONNECT fails, the real
+        # reason lands here in a task nobody awaits, while the caller sits
+        # on a coroutine that never returns — so the run would report a
+        # 90-second timeout for something the service said instantly.
+        exc = context.get("exception")
+        if exc is not None:
+            _Loop.last_error = f"{type(exc).__name__}: {exc}"
         if any(m in message for m in (
                 "Target closed", "Connection closed", "No session with given id",
                 "Task was destroyed but it is pending",
-                "Future exception was never retrieved", "Event loop is closed")):
+                # asyncio uses BOTH spellings and they are not
+                # interchangeable: a dead connect surfaces as "Task
+                # exception was never retrieved", and a filter carrying
+                # only the "Future" wording printed a full traceback under
+                # an error the engine had already handled.
+                "Future exception was never retrieved",
+                "Task exception was never retrieved",
+                "Event loop is closed")):
             logger.debug("Ignoring teardown noise from pyppeteer: %s", message)
             return
         loop.default_exception_handler(context)
@@ -265,7 +289,8 @@ class _BrowserSession:
     """
 
     def __init__(self, loop, browser, page, proxy_url: Optional[str],
-                 client_version: str, user_agent: Optional[str]):
+                 client_version: str, user_agent: Optional[str],
+                 owns_browser: bool = True):
         self.loop = loop
         self.browser = browser
         self.context = browser
@@ -273,6 +298,10 @@ class _BrowserSession:
         self.proxy_url = proxy_url
         self.client_version = client_version
         self.user_agent = user_agent
+        # False when we CONNECTED to somebody else's browser rather than
+        # launching one. It decides how this session ends, and getting it
+        # wrong is not cosmetic — see `close`.
+        self.owns_browser = owns_browser
         self._url = ""
 
     # -- transport ---------------------------------------------------------
@@ -343,8 +372,26 @@ class _BrowserSession:
             return self._url
 
     def close(self):
+        """End the session — and over CDP, end OURS rather than theirs.
+
+        `Browser.close()` in pyppeteer sends `Browser.close` over the
+        protocol, which tells the browser on the other end to shut down.
+        That is right for a Chromium this process launched and WRONG for a
+        Scraping Browser profile we merely connected to: it ends a remote
+        session somebody is paying for, and the next run against the same
+        `pid` meets whatever state that left behind. `disconnect()` closes
+        our WebSocket and leaves the browser alone.
+
+        Playwright's `connect_over_cdp` disconnects on `close()` by
+        definition, so its engine needs no equivalent — but it must not
+        close a CONTEXT it adopted rather than created, which is the same
+        mistake one level down.
+        """
         try:
-            self.loop.run(self.browser.close(), timeout=20)
+            if self.owns_browser:
+                self.loop.run(self.browser.close(), timeout=20)
+            else:
+                self.loop.run(self.browser.disconnect(), timeout=20)
         except Exception:
             pass
         try:
@@ -418,19 +465,42 @@ def _connect_remote(pw, args) -> _BrowserSession:
     takes a full `ws://user:pass@host:port` and authenticates on the
     WebSocket upgrade, so an authenticated endpoint works here.
     """
+    # Retried, and the reason is measured — see the same passage in
+    # playwright_scraper.py. Three raw WebSocket upgrades to a live
+    # Scraping Browser endpoint on 2026-09-21: `HTTP 500` instantly on the
+    # first, connected on the other two.
     loop = _Loop()
-    try:
-        browser = loop.run(connect(browserWSEndpoint=args.cdp_endpoint),
-                           timeout=90)
-    except Exception as exc:                           # noqa: BLE001
-        loop.close()
-        raise RemoteBrowserError(
-            f"could not connect to --cdp-endpoint: "
-            f"{_mask_credentials(exc)}") from exc
+    browser = None
+    attempts = max(1, int(getattr(args, "retries", 2)) + 1)
+    for attempt in range(1, attempts + 1):
+        _Loop.last_error = None
+        try:
+            browser = loop.run(connect(browserWSEndpoint=args.cdp_endpoint),
+                               timeout=CDP_CONNECT_TIMEOUT)
+            break
+        except Exception as exc:                       # noqa: BLE001
+            # The awaited call times out; the REAL reason is whatever the
+            # loop's handler caught. Preferring it turns "did not return
+            # within 30s" into "server rejected WebSocket connection: HTTP
+            # 500", which is the difference between checking your network
+            # and reading CLAUDE.md §20.
+            reason = _mask_credentials(_Loop.last_error or exc)
+            if attempt >= attempts or "profile_locked" in reason:
+                loop.close()
+                raise RemoteBrowserError(
+                    f"could not connect to --cdp-endpoint: "
+                    f"{reason}") from exc
+            logger.warning("Scraping Browser refused the WebSocket upgrade "
+                           "(%s) — attempt %d/%d, retrying in %.1fs. This is "
+                           "usually the service, not the request.",
+                           str(reason).strip()[:120], attempt, attempts,
+                           args.retry_delay)
+            time.sleep(args.retry_delay)
     pages = loop.run(browser.pages(), timeout=30) or []
     page = pages[0] if pages else loop.run(browser.newPage(), timeout=30)
     return _BrowserSession(loop, browser, page, None,
-                           FALLBACK_CLIENT_VERSION, None)
+                           FALLBACK_CLIENT_VERSION, None,
+                           owns_browser=False)
 
 
 def _open_session(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:

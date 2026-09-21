@@ -194,7 +194,14 @@ class _BrowserSession:
     """
 
     def __init__(self, driver, proxy_url: Optional[str],
-                 client_version: str, user_agent: Optional[str]):
+                 client_version: str, user_agent: Optional[str],
+                 owns_driver: bool = True):
+        # Always True here: this engine cannot connect to a remote browser
+        # at all (see the module docstring), so it only ever ends a driver
+        # it started. The flag exists so the three sessions carry the same
+        # shape and `check_every_engine_exposes_the_same_public_surface`
+        # can say so.
+        self.owns_driver = owns_driver
         self.driver = driver
         self.browser = driver
         self.context = driver
