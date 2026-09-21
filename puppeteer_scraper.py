@@ -231,7 +231,24 @@ class _Loop:
             return
         loop.default_exception_handler(context)
 
-    def run(self, coro, timeout: Optional[float] = 60.0):
+    def run(self, awaitable, timeout: Optional[float] = 60.0):
+        """Run any AWAITABLE on the loop, not only a coroutine.
+
+        `asyncio.run_coroutine_threadsafe` requires a coroutine and rejects
+        anything else with "A coroutine object is required" — and pyppeteer
+        is not consistent about which it hands back: `page.goto` returns a
+        coroutine while `CDPSession.send` returns a Future. That difference
+        cost a real bug: the fingerprint's client hints reported as failed
+        while the command had in fact been dispatched, so the identity was
+        applied HALF and the log said it had not been applied at all. Both
+        halves of that are worse than either.
+        """
+        if asyncio.iscoroutine(awaitable):
+            coro = awaitable
+        else:
+            async def _await(value):
+                return await value
+            coro = _await(awaitable)
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         try:
             return future.result(timeout)
@@ -441,19 +458,114 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
                                     "password": password}), timeout=30)
 
     user_agent = None
+    fingerprint = None
     if args.fingerprint:
         from fingerprint_client import get_fingerprint, fingerprint_user_agent
-        fp = get_fingerprint(args.twocaptcha_key, tags=args.fp_tags,
-                             country=args.fp_country)
-        user_agent = fingerprint_user_agent(fp)
+        fingerprint = get_fingerprint(args.twocaptcha_key, tags=args.fp_tags,
+                                      country=args.fp_country)
+        user_agent = fingerprint_user_agent(fingerprint)
     if not user_agent:
         version = loop.run(browser.version(), timeout=20) or ""
         user_agent = _chrome_ua(version.split("/")[-1] if "/" in version
                                 else version)
     loop.run(page.setUserAgent(user_agent), timeout=20)
     loop.run(page.setViewport({"width": 1366, "height": 900}), timeout=20)
+    if fingerprint is not None:
+        _apply_fingerprint(loop, page, fingerprint, user_agent)
     return _BrowserSession(loop, browser, page, proxy_url,
                            FALLBACK_CLIENT_VERSION, user_agent)
+
+
+def _apply_fingerprint(loop, page, fingerprint, user_agent) -> None:
+    """Give the identity everything the fingerprint states, not just a UA.
+
+    CLAUDE.md §24 measured a BARE user-agent override being served on the
+    first navigation and refused on the next three, while a complete
+    identity was served throughout. `page.setUserAgent` on its own is that
+    bare override: it changes `navigator.userAgent` and leaves
+    `navigator.userAgentData` — and the `Sec-CH-UA` header — reporting the
+    real browser.
+
+    So this engine applies the same set its Playwright twin does: the
+    client hints beside the user agent, the screen, the timezone, and the
+    init script that carries `navigator.languages`, the platform and the
+    WebGL strings. Best effort throughout — a fingerprint is cover, and no
+    run should die because cover was imperfect.
+    """
+    from fingerprint_client import (user_agent_metadata, accept_language,
+                                    playwright_init_script)
+
+    # The init script goes in through the RAW protocol command, not through
+    # `page.evaluateOnNewDocument`. That wrapper treats its argument as a
+    # function EXPRESSION and emits `(<arg>)(…)`, so the shared module's
+    # ready-to-run `(() => {…})();` becomes a syntax error that Chromium
+    # drops in silence — the call reports success and nothing is installed.
+    #
+    # Measured 2026-09-21 rather than reasoned about: a run reported the
+    # fingerprint applied while the page returned `deviceMemory` 8 against
+    # the fingerprint's 32, `hardwareConcurrency` 4 against 32, and the
+    # real SwiftShader renderer string. CLAUDE.md §1 names this exact
+    # hazard — the drivers disagree about what a snippet IS — which is why
+    # the shared module emits source and each engine installs it its own
+    # way.
+    session = None
+    try:
+        session = loop.run(page.target.createCDPSession(), timeout=20)
+        # `Page.enable` FIRST, and it is not a formality. Without it the
+        # protocol still answers `{"identifier": "1"}` — a success — and
+        # never runs the script. Measured side by side on the same
+        # fingerprint: without it the page reported `deviceMemory` 8,
+        # with it 32, which is what the fingerprint states.
+        loop.run(session.send("Page.enable", {}), timeout=20)
+        loop.run(session.send("Page.addScriptToEvaluateOnNewDocument",
+                              {"source": playwright_init_script(fingerprint)}),
+                 timeout=20)
+    except Exception as exc:                           # noqa: BLE001
+        logger.warning("Could not install the fingerprint's init script: %s",
+                       _mask_credentials(exc))
+
+    screen = (fingerprint.get("screen") or {})
+    if screen.get("width") and screen.get("height"):
+        try:
+            loop.run(page.setViewport({
+                "width": int(screen.get("outerWidth") or screen["width"]),
+                "height": max(400, int(screen.get("outerHeight")
+                                       or screen["height"] - 120)),
+                "deviceScaleFactor": float(screen.get("deviceScaleFactor") or 1),
+            }), timeout=20)
+        except Exception:                              # noqa: BLE001
+            pass
+
+    metadata = user_agent_metadata(fingerprint)
+    if not metadata:
+        logger.warning("The fingerprint carried no brand list, so its client "
+                       "hints are left alone: a HALF identity is worse than "
+                       "none (CLAUDE.md §24).")
+        return
+    payload = {"userAgent": user_agent, "userAgentMetadata": metadata}
+    language = accept_language(fingerprint)
+    if language:
+        payload["acceptLanguage"] = language
+    platform = (fingerprint.get("navigator") or {}).get("platform")
+    if platform:
+        payload["platform"] = platform
+    try:
+        if session is None:
+            session = loop.run(page.target.createCDPSession(), timeout=20)
+        loop.run(session.send("Network.setUserAgentOverride", payload),
+                 timeout=20)
+        # Kept, never detached: detaching REVERTS the override, and the
+        # call succeeds either way — measured on the Playwright twin.
+        page._2captcha_cdp_session = session
+        timezone = (fingerprint.get("intl") or {}).get("timeZone")
+        if timezone:
+            loop.run(session.send("Emulation.setTimezoneOverride",
+                                  {"timezoneId": timezone}), timeout=20)
+    except Exception as exc:                           # noqa: BLE001
+        logger.warning("Could not apply the fingerprint's client hints (%s) — "
+                       "the run continues, but navigator.userAgentData will "
+                       "disagree with the user agent.",
+                       _mask_credentials(exc))
 
 
 def _connect_remote(pw, args) -> _BrowserSession:
@@ -609,10 +721,25 @@ def handle_captcha_if_present(session: _BrowserSession, args,
         return False
     if not budget.spend():
         return False
+    if args.cdp_endpoint:
+        # The token is MINTED over plain HTTPS from this machine and then
+        # installed into a browser that is somewhere else entirely. A
+        # Scraping Browser endpoint carries a `country-` segment, so the
+        # solve can be issued on one continent and replayed from another —
+        # and a token a challenge issuer binds to the solving address is
+        # then worthless on arrival. Said out loud rather than left to be
+        # discovered from a bill: nothing here can fix it, and the remedy
+        # is the endpoint's own auto-solve (`Captcha.setAutoSolve`), which
+        # runs where the browser is.
+        logger.warning("Solving over --cdp-endpoint mints the token from "
+                       "THIS machine and installs it into a remote browser, "
+                       "so it may be issued on a different exit than the one "
+                       "that will use it. If the token is refused, that is "
+                       "the likeliest reason.")
     try:
         token = solve_recaptcha(challenge, args.twocaptcha_key,
                                 min_score=args.min_score,
-                                api=args.captcha_api)
+                                api_version=args.captcha_api)
     except CaptchaUnsolvable as exc:
         logger.warning("Captcha not solved: %s", _mask_credentials(exc))
         return False

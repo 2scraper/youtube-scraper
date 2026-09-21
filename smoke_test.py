@@ -555,11 +555,24 @@ def check_shared_calls_bind_against_the_real_signature():
     This walks every engine's AST for calls into the shared modules and binds
     each one against the callee's real signature.
     """
+    # EVERY shared module, not the three that are easy. A sibling repo
+    # widened this after a key arrived and five calls into functions that
+    # never existed came out of the credential-gated paths — the ones
+    # nobody runs, for the obvious reason (CLAUDE.md §16). Two of the
+    # modules below are reachable only with a key.
+    import captcha_solver
+    import diff_runs
+    import env_config
+    import fingerprint_client
+    import output_writer
     import page_flow
     import product_parser
-    import output_writer
+    import proxy_pool
     targets = {"page_flow": page_flow, "product_parser": product_parser,
-               "output_writer": output_writer}
+               "output_writer": output_writer, "proxy_pool": proxy_pool,
+               "fingerprint_client": fingerprint_client,
+               "captcha_solver": captcha_solver, "env_config": env_config,
+               "diff_runs": diff_runs}
     bound = 0
     for module in ENGINES + ("scraper_api_client",):
         path = os.path.join(HERE, module + ".py")
@@ -574,14 +587,34 @@ def check_shared_calls_bind_against_the_real_signature():
                 for alias in node.names:
                     direct[alias.asname or alias.name] = (
                         targets[node.module], alias.name)
+
+        # A name bound ANYWHERE in this file shadows a same-named module
+        # (CLAUDE.md §22). An engine that takes `proxy_pool` as a parameter
+        # is calling a method on an object, not a module attribute, and
+        # without this rule that reported twenty-one false positives on a
+        # clean repo in a sibling. Parameters count whether or not they
+        # carry a type annotation — an annotation is not what makes a name
+        # a local.
+        shadowed = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                spec = node.args
+                for arg in (list(spec.args) + list(spec.posonlyargs)
+                            + list(spec.kwonlyargs)
+                            + [a for a in (spec.vararg, spec.kwarg) if a]):
+                    shadowed.add(arg.arg)
+            elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                shadowed.add(node.id)
+        local_targets = {name: mod for name, mod in targets.items()
+                         if name not in shadowed}
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             owner = attr = None
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-                if func.value.id in targets:
-                    owner, attr = targets[func.value.id], func.attr
+                if func.value.id in local_targets:
+                    owner, attr = local_targets[func.value.id], func.attr
             elif isinstance(func, ast.Name) and func.id in direct:
                 owner, attr = direct[func.id]
             if owner is None:
@@ -603,28 +636,40 @@ def check_shared_calls_bind_against_the_real_signature():
                       "define; a live run reaches this as AttributeError")
                 continue
             callee = getattr(owner, attr)
-            if not callable(callee) or inspect.isclass(callee):
+            if not callable(callee):
                 continue
-            try:
-                signature = inspect.signature(callee)
-            except (TypeError, ValueError):
-                continue
+            if inspect.isclass(callee):
+                # A CONSTRUCTOR is a call like any other, and skipping it
+                # is how `SolveBudget(limit=…)` or `ProxyPool(rotate=…)`
+                # with a wrong keyword reaches a live run untested. Bind
+                # against `__init__` with `self` already supplied.
+                try:
+                    signature = inspect.signature(callee.__init__)
+                    signature = signature.replace(
+                        parameters=list(signature.parameters.values())[1:])
+                except (TypeError, ValueError):
+                    continue
+            else:
+                try:
+                    signature = inspect.signature(callee)
+                except (TypeError, ValueError):
+                    continue
             positional = [inspect.Parameter.empty] * len(node.args)
             keywords = {}
             for kw in node.keywords:
-                if kw.arg is None:          # **kwargs — cannot be checked here
-                    keywords = None
+                if kw.arg is None:
                     break
                 keywords[kw.arg] = inspect.Parameter.empty
-            if keywords is None:
-                continue
-            try:
-                signature.bind(*positional, **keywords)
-                bound += 1
-            except TypeError as e:
-                check("%s:%d %s.%s(...) binds against its real signature"
-                      % (module, node.lineno, owner.__name__, attr),
-                      False, "%s; signature is %s" % (e, signature))
+            else:
+                try:
+                    signature.bind(*positional, **keywords)
+                    bound += 1
+                except TypeError as exc:
+                    check("%s:%d %s.%s(...) binds against its real signature"
+                          % (module, node.lineno,
+                             getattr(owner, "__name__", owner), attr),
+                          False,
+                          "%s; signature is %s" % (exc, signature))
     check("every shared-module call in every engine binds (%d checked)" % bound,
           bound > 40, "only %d calls were checked — is the walk finding them?"
           % bound)
@@ -2254,6 +2299,215 @@ def check_the_scraping_browsers_own_extension_does_not_read_as_a_challenge():
               % injected,
               injected not in markers,
               "it appears on pages YouTube serves normally")
+
+
+def check_a_fingerprint_is_applied_whole_or_not_at_all():
+    """CLAUDE.md §24: a HALF identity is measured worse than none.
+
+    Four defects lived on this path, every one of them a SILENT success —
+    the call was accepted, the log said nothing, and the page disagreed
+    with the fingerprint. All four were found by reading the values back
+    out of a live page on 2026-09-21, which is what §24 tells you to do
+    and which no amount of reading this code would have produced:
+
+      1. `navigator.languages` reported `["en-US"]` against the
+         fingerprint's `["en-US", "en"]`, because Playwright's `locale=`
+         sets the PRIMARY language only.
+      2. `navigator.userAgentData.brands` reported `HeadlessChrome/153`
+         while the user agent claimed `Chrome/150` — the client hints are
+         the half a `user_agent=` option leaves behind.
+      3. Detaching the CDP session REVERTED the override, and the protocol
+         reported success either way.
+      4. In pyppeteer the init script never ran: `evaluateOnNewDocument`
+         wraps its argument as a function expression, and
+         `Page.addScriptToEvaluateOnNewDocument` silently does nothing
+         until `Page.enable` has been sent — it answers
+         `{"identifier": "1"}` regardless.
+
+    These are asserted on the SOURCE and on the pure functions, because
+    the branch needs a live browser and a paid key, and the suite must
+    pass with neither.
+    """
+    import fingerprint_client as F
+
+    # A fingerprint shaped like the ones the live API returns.
+    fp = {
+        "userAgent": {
+            "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                     "AppleWebKit/537.36 (KHTML, like Gecko) "
+                     "Chrome/150.0.0.0 Safari/537.36",
+            "brandVersionList": [{"brand": "Not;A=Brand", "version": "8"},
+                                 {"brand": "Chromium", "version": "150"},
+                                 {"brand": "Google Chrome", "version": "150"}],
+            "brandFullVersionList": [{"brand": "Chromium",
+                                      "version": "150.0.0.0"}],
+            "platform": "Windows", "platformVersion": "19.0.0",
+            "architecture": "x86", "bitness": "64", "model": "",
+            "mobile": False, "fullVersion": "150.0.0.0",
+        },
+        "navigator": {"platform": "Win32", "hardwareConcurrency": 32,
+                      "deviceMemory": 32},
+        "intl": {"languages": ["en-US", "en"], "contentLocale": "en-US",
+                 "timeZone": "America/New_York"},
+        "screen": {"width": 2560, "height": 1440, "deviceScaleFactor": 1.5},
+        "webgl": {"vendor": "Google Inc.", "renderer": "ANGLE (NVIDIA)"},
+    }
+
+    metadata = F.user_agent_metadata(fp)
+    check("a complete fingerprint yields client hints", bool(metadata))
+    equal("the brands come from the fingerprint, not the browser",
+          [b["brand"] for b in metadata["brands"]],
+          ["Not;A=Brand", "Chromium", "Google Chrome"])
+    equal("platform", metadata["platform"], "Windows")
+    equal("platformVersion", metadata["platformVersion"], "19.0.0")
+    equal("bitness", metadata["bitness"], "64")
+    equal("mobile is a real bool", metadata["mobile"], False)
+
+    # The refusal half: no brand list means no metadata, so the caller
+    # leaves the hints alone rather than applying a fragment of one.
+    equal("an incomplete fingerprint yields NO metadata",
+          F.user_agent_metadata({"userAgent": {"platform": "Windows"}}), None)
+    equal("...and neither does an empty one",
+          F.user_agent_metadata({}), None)
+
+    # Accept-Language carries no q-values, and the reason is written down.
+    equal("Accept-Language is built without q-values",
+          F.accept_language(fp), "en-US,en")
+    check("...and why is recorded beside it",
+          "q-value" in inspect.getdoc(F.accept_language),
+          "Chromium derives navigator.languages from this string and keeps "
+          "the qualifier, which no real browser reports")
+    equal("no languages, no header", F.accept_language({}), None)
+
+    # The init script carries the language list, which `locale=` cannot.
+    script = F.playwright_init_script(fp)
+    check("the init script carries navigator.languages",
+          "'languages'" in script and "en-US" in script)
+    check("...and the platform and WebGL strings with it",
+          "'platform'" in script and "37446" in script)
+
+    # And every engine applies the two TOGETHER.
+    for module in ENGINES:
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
+            continue
+        source = open(path, encoding="utf-8").read()
+        check("%s applies the client hints beside the user agent" % module,
+              '"userAgent": user_agent, "userAgentMetadata": metadata'
+              in source,
+              "a bare override is the thing §24 measured being refused")
+        check("%s refuses to apply a partial identity" % module,
+              "HALF identity is worse than" in source,
+              "no brand list must mean no override at all")
+        check("%s never detaches the session that carries it" % module,
+              ".detach()" not in source,
+              "detaching reverts the override, and the call succeeds anyway")
+        # The timezone reaches the browser by a DIFFERENT route in each
+        # engine, and that is legitimate rather than drift: Playwright
+        # takes `timezone_id` as a context option, which is what
+        # `playwright_context_kwargs` sets; the other two have no such
+        # option and send `Emulation.setTimezoneOverride`. Naming the
+        # route per engine is what keeps a missing one visible — all three
+        # were verified against a live page reporting America/New_York on
+        # 2026-09-21.
+        route = ("playwright_context_kwargs" if module == "playwright_scraper"
+                 else "Emulation.setTimezoneOverride")
+        check("%s applies the fingerprint's timezone (via %s)"
+              % (module, route), route in source,
+              "a browser reporting UTC under a New York fingerprint "
+              "contradicts itself on an axis any script reads")
+
+    puppeteer = os.path.join(HERE, "puppeteer_scraper.py")
+    if os.path.exists(puppeteer):
+        source = open(puppeteer, encoding="utf-8").read()
+        check("pyppeteer enables the Page domain before adding the script",
+              'send("Page.enable"' in source,
+              "without it the protocol answers success and runs nothing")
+        check("...and does not use the wrapper that mangles the source",
+              "evaluateOnNewDocument(\n" not in source
+              and "page.evaluateOnNewDocument(" not in source,
+              "that wrapper emits `(<source>)()` and Chromium drops the "
+              "syntax error in silence")
+        check("...and installs it through the raw protocol command instead",
+              "Page.addScriptToEvaluateOnNewDocument" in source)
+
+
+def check_the_credential_scan_covers_the_files_it_most_needs_to():
+    """The repo's own guard was blind to its biggest files, twice over.
+
+    Both were found by PLANTING a real-shaped key and running the scan
+    rather than by reading it (CLAUDE.md §23), and both reported
+    "nothing credential-shaped" over a file that held one:
+
+      1. `.json` and `.csv` were not in `SCANNED_SUFFIXES` at all, so
+         `fixtures_generated.json` — 500-odd KB of captured page payload,
+         which is precisely where a front-end key or a session token
+         arrives — was never opened.
+      2. With the suffixes added it STILL passed, because the allowlists
+         were applied per LINE and that fixture is a single line. It
+         contains "sha" 69 times and "hash" 36 times, so one allowlisted
+         token anywhere in it exempted every match in the whole file. A
+         line-scoped allowlist becomes a FILE-scoped one the moment a file
+         is one line.
+
+    Added with no new allowlist entries, which is the point: the real
+    fixtures and sample carry zero 32-hex strings and zero credentialled
+    URLs, so the strictest rule now covers the largest files instead of
+    acquiring an exception a real key could hide behind (CLAUDE.md §24).
+    """
+    sys.path.insert(0, os.path.join(HERE, ".github"))
+    import ci_checks
+
+    for suffix in (".json", ".csv"):
+        check("the scan opens %s files" % suffix,
+              suffix in ci_checks.SCANNED_SUFFIXES,
+              "the generated fixtures and the committed sample are these")
+
+    scanned = {str(p.relative_to(ci_checks.REPO))
+               for p in ci_checks.scanned_files()}
+    for name in ("fixtures_generated.json", "sample_output.json",
+                 "sample_output.csv"):
+        check("the scan reaches %s" % name, name in scanned,
+              "it is committed, and it is captured payload")
+
+    # The window, and that it is narrower than a one-line fixture.
+    check("the allowlist is scoped to a window, not to a line",
+          hasattr(ci_checks, "_allowed_near"),
+          "a per-line allowlist exempts a whole one-line file")
+    equal("a token beside the match still excuses it",
+          ci_checks._allowed_near("md5 " + "a" * 32, 4, 36,
+                                  ci_checks.HEX32_ALLOWED, lower=True), True)
+    far = "md5" + " " * 400 + "b" * 32
+    equal("a token 400 characters away does not",
+          ci_checks._allowed_near(far, len(far) - 32, len(far),
+                                  ci_checks.HEX32_ALLOWED, lower=True), False)
+    check("the window is narrower than the fixture is long",
+          ci_checks.ALLOWLIST_WINDOW * 2 <
+          len(json.dumps(FIX, ensure_ascii=False)),
+          "otherwise the fixture is one window and nothing is scoped")
+
+    # And the escaped-quote half: a fixture stored as JSON escapes every
+    # quote inside it, so a pattern with plain quotes matches nothing.
+    #
+    # The sample is ASSEMBLED from pieces rather than written out, and that
+    # is not fussiness — the scan now reads this file, and a literal
+    # credentialled URL here would make the check fail on its own test
+    # data. CLAUDE.md §22: a note about a banned string is a use of it, and
+    # assembling is what lets the scan cover the suite instead of
+    # exempting the one file most likely to acquire a pasted secret.
+    sample = "ws:" + "//" + "acct7" + ":" + "s3cr3tpw" + "@" + "host:9222"
+    check("the credentialled-URL pattern tolerates an escaped quote",
+          ci_checks.CREDENTIALLED_URL.search('{"e": \\"%s\\"}' % sample)
+          is not None)
+    check("...and the bare form too",
+          ci_checks.CREDENTIALLED_URL.search('{"e": "%s"}' % sample)
+          is not None)
+    # A documented placeholder must still be allowed, or the check becomes
+    # one people switch off.
+    placeholder = "ws:" + "//" + "user" + ":" + "pass" + "@" + "host:9222"
+    check("a documented placeholder is still allowed",
+          ci_checks._allowed_near(placeholder, 0, len(placeholder),
+                                  ci_checks.CREDENTIAL_ALLOWED))
 
 
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")

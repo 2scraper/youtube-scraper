@@ -49,7 +49,12 @@ FABRICATION_MARKERS = ("sample-product-", "example brand", "sample product",
 # (deliberately not spelled out as an example here: this file scans itself, and
 # an illustrative credential in a comment is a false positive that turns the
 # build red for no reason. It happened on the first run.)
-CREDENTIALLED_URL = re.compile(r"(?:ws|wss|https?)://[^\s\"'/]+:[^\s\"'/]+@")
+# The quotes are optional-escaped (`\\?"`) because a fixture stored as a
+# JSON string escapes every quote inside it: the file holds
+# `\\"ws://user:pass@host\\"`, never the bare form. A pattern with plain
+# quotes matched zero times in the largest file in the repo.
+CREDENTIALLED_URL = re.compile(
+    r"(?:ws|wss|https?)://[^\s\\\"'/]+:[^\s\\\"'/]+@")
 
 # Documented placeholders and test values, which are SUPPOSED to look like the
 # real thing — that is the point of them. Each entry earns its place by being
@@ -88,7 +93,20 @@ HEX32 = re.compile(r"\b[0-9a-f]{32}\b")
 HEX32_ALLOWED = ("sha", "hash", "nonce", "example", "md5", "digest",
                  "checksum")
 
-SCANNED_SUFFIXES = (".py", ".md", ".txt", ".yml", ".yaml", ".example")
+# `.json` and `.csv` are in this list, and they were the hole. Without
+# them the scan skipped the BIGGEST files in the repository — the generated
+# fixtures and the committed sample, which are captured page payload and
+# therefore exactly where a front-end key or a session token arrives.
+# Measured 2026-09-21 by planting a real-shaped 2captcha key and a
+# `ws://user:pass@` URL into `fixtures_generated.json`: the scan reported
+# "nothing credential-shaped" over 35 files.
+#
+# Added with NO allowlist, which is the point: the real fixtures and sample
+# contain zero 32-hex strings and zero credentialled URLs, so the strictest
+# rule covers the largest files rather than acquiring an exception that a
+# real key could later hide behind (CLAUDE.md §24).
+SCANNED_SUFFIXES = (".py", ".md", ".txt", ".yml", ".yaml", ".example",
+                    ".json", ".csv")
 
 
 # Directories that are never this repo's own source. Named ones first, then
@@ -200,6 +218,21 @@ def sample_check():
     return failed
 
 
+# How far either side of a match an allowlisted token still counts as
+# context for it. Wide enough to cover a comment on the same line and a
+# label a few words away; far too narrow for the other end of a 542 KB
+# one-line fixture, which is the whole point.
+ALLOWLIST_WINDOW = 120
+
+
+def _allowed_near(line, start, end, tokens, lower=False):
+    """Whether an allowlisted token sits close enough to excuse this match."""
+    window = line[max(0, start - ALLOWLIST_WINDOW):end + ALLOWLIST_WINDOW]
+    if lower:
+        window = window.lower()
+    return any(token in window for token in tokens)
+
+
 def secret_check():
     failed = []
     scanned = 0
@@ -209,16 +242,29 @@ def secret_check():
                 path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             rel = path.relative_to(REPO)
 
-            if CREDENTIALLED_URL.search(line) and not any(
-                    token in line for token in CREDENTIAL_ALLOWED):
+            # The allowlists are applied to a WINDOW around each match,
+            # never to the whole line. A line-scoped allowlist degenerates
+            # into a FILE-scoped one the moment a file is a single line —
+            # and a JSON fixture is: this repo's is 542 KB on one line and
+            # contains the word "hash" 88 times, so one allowlisted token
+            # anywhere in it exempted every match in the file. Measured by
+            # planting a real-shaped key and watching the scan report
+            # "nothing credential-shaped" (CLAUDE.md §22: a control is only
+            # worth what the edit it actually made is worth).
+            for match in CREDENTIALLED_URL.finditer(line):
+                if _allowed_near(line, match.start(), match.end(),
+                                 CREDENTIAL_ALLOWED):
+                    continue
                 failed.append(f"{rel}:{lineno} looks like a URL with real "
                               f"credentials in it")
 
-            for match in HEX32.findall(line):
-                if any(token in line.lower() for token in HEX32_ALLOWED):
+            for match in HEX32.finditer(line):
+                if _allowed_near(line, match.start(), match.end(),
+                                 HEX32_ALLOWED, lower=True):
                     continue
-                failed.append(f"{rel}:{lineno} contains {match[:6]}… — a "
-                              f"32-char hex string, the shape of a 2captcha key")
+                failed.append(f"{rel}:{lineno} contains {match.group(0)[:6]}… "
+                              f"— a 32-char hex string, the shape of a "
+                              f"2captcha key")
 
     if not failed:
         print(f"ok       {scanned} files scanned, nothing credential-shaped")

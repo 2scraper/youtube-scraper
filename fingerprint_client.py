@@ -290,12 +290,25 @@ def playwright_init_script(fp: dict) -> str:
     """
     nav = fp.get("navigator") or {}
     webgl = fp.get("webgl") or {}
+    intl = fp.get("intl") or {}
+    # `navigator.languages`, which Playwright's `locale=` does NOT set.
+    # `locale=` sets the PRIMARY language only, so a fingerprint stating
+    # ["en-US", "en"] produced a page reporting ["en-US"] — a one-element
+    # list beside a two-element Accept-Language header, which is a
+    # contradiction on an axis any script reads for free. Measured
+    # 2026-09-21 by reading the value back out of a live page rather than
+    # by reading this file: the kwargs were all accepted and the page
+    # still disagreed.
+    languages = intl.get("languages")
+    if not isinstance(languages, list) or not languages:
+        languages = None
     payload = json.dumps({
         "platform": nav.get("platform"),
         "hardwareConcurrency": nav.get("hardwareConcurrency"),
         "deviceMemory": nav.get("deviceMemory"),
         "webglVendor": webgl.get("vendor"),
         "webglRenderer": webgl.get("renderer"),
+        "languages": languages,
     })
     return """
 (() => {
@@ -308,6 +321,10 @@ def playwright_init_script(fp: dict) -> str:
   def(Navigator.prototype, 'platform', fp.platform);
   def(Navigator.prototype, 'hardwareConcurrency', fp.hardwareConcurrency);
   def(Navigator.prototype, 'deviceMemory', fp.deviceMemory);
+  // Frozen so `navigator.languages[0]` and `.length` behave like the real
+  // thing rather than like a live array a script could mutate.
+  if (fp.languages) { def(Navigator.prototype, 'languages',
+                          Object.freeze(fp.languages.slice())); }
 
   // WEBGL_debug_renderer_info: 37445 = UNMASKED_VENDOR, 37446 = UNMASKED_RENDERER.
   // Patch both WebGL1 and WebGL2 — a fingerprinter that reads only WebGL2 would
@@ -323,6 +340,74 @@ def playwright_init_script(fp: dict) -> str:
   }
 })();
 """ % payload
+
+
+def user_agent_metadata(fp: dict) -> Optional[dict]:
+    """The User-Agent Client Hints, in the shape CDP takes, or None.
+
+    This is the half of an identity that a `user_agent=` context option —
+    and a bare `Network.setUserAgentOverride` — leaves reporting the REAL
+    browser. Measured 2026-09-21: a context given this API's Windows
+    fingerprint reported `Chrome/150` in `navigator.userAgent` and
+    `HeadlessChrome/153` in `navigator.userAgentData.brands`, which is a
+    contradiction rather than cover.
+
+    CLAUDE.md §24 is explicit that a HALF identity is worse than none — a
+    bare UA override there was served on the first navigation and refused
+    on the next three, while a complete one was served throughout. So this
+    returns None unless the API gave enough to be complete, and the caller
+    must apply it TOGETHER with the user agent, never on its own.
+    """
+    ua = fp.get("userAgent") or {}
+    brands = ua.get("brandVersionList")
+    platform = ua.get("platform") or (fp.get("navigator") or {}).get("platform")
+    if not isinstance(brands, list) or not brands or not platform:
+        return None
+
+    def _pairs(value):
+        out = []
+        for item in value or []:
+            if isinstance(item, dict) and item.get("brand"):
+                out.append({"brand": str(item["brand"]),
+                            "version": str(item.get("version") or "")})
+        return out
+
+    metadata = {
+        "brands": _pairs(brands),
+        "platform": str(platform),
+        "platformVersion": str(ua.get("platformVersion") or ""),
+        "architecture": str(ua.get("architecture") or ""),
+        "model": str(ua.get("model") or ""),
+        "mobile": bool(ua.get("mobile")),
+    }
+    full = _pairs(ua.get("brandFullVersionList"))
+    if full:
+        metadata["fullVersionList"] = full
+    if ua.get("fullVersion"):
+        metadata["fullVersion"] = str(ua["fullVersion"])
+    if ua.get("bitness"):
+        metadata["bitness"] = str(ua["bitness"])
+    return metadata
+
+
+def accept_language(fp: dict) -> Optional[str]:
+    """The `Accept-Language` header this identity should send.
+
+    Built from the fingerprint's own language list so the header and
+    `navigator.languages` agree — they are read together.
+
+    Deliberately WITHOUT q-values, though a real browser sends them.
+    Chromium derives `navigator.languages` from this string and does not
+    strip the qualifier: passing `"en-US,en;q=0.9"` produced a page
+    reporting `["en-US", "en;q=0.9"]`, which no real browser has ever
+    said. A header missing its q-values is a small oddity; a language list
+    containing one is a contradiction, and this flag exists to avoid
+    contradictions.
+    """
+    languages = (fp.get("intl") or {}).get("languages")
+    if not isinstance(languages, list) or not languages:
+        return None
+    return ",".join(str(lang) for lang in languages)
 
 
 def main() -> int:

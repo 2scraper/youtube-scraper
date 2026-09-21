@@ -67,6 +67,24 @@ Adding a residential proxy (`--proxy`) or the Scraping Browser
 (`--cdp-endpoint`) is the usual next move, and the README says plainly
 that neither has been needed so far.
 
+**What NOT to reach for first: a hand-written `--user-agent`.** There is no
+such flag here, and that is deliberate. A claimed user agent with the real
+browser's TLS handshake and client hints underneath it is a contradiction,
+and on at least one site in this family that contradiction is the whole
+reason a request gets refused — served on the first navigation and denied on
+the next three.
+
+`--fingerprint` is the opposite case and is safe to try: it supplies a
+COMPLETE identity — user agent, client hints, platform, timezone, language
+list, screen and WebGL strings together — verified on 2026-09-21 by reading
+all of them back out of a live page in each engine. Do not stack it on
+`--cdp-endpoint`, which brings its own; the engines refuse that combination.
+
+**And if a solve is refused over `--cdp-endpoint`**: the token is minted
+from your machine and installed into a browser that may be on another
+continent. The run warns about it. The endpoint's own auto-solve runs where
+the browser is and does not have that problem.
+
 ---
 
 ## `exit 5` — remote API error
