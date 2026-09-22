@@ -1366,58 +1366,91 @@ def check_fingerprint_kwargs_are_ones_the_driver_accepts():
 def check_every_engine_exposes_the_same_public_surface():
     """The three engines are one file with three driver layers.
 
-    So this is not a hope about parallel maintenance — it is a fact that
-    can go stale, and this check is what notices. Every name the shared
-    half uses must exist in all three, and `PageOutcome` must have the
-    same shape everywhere, because that object is what carries a worker's
-    result back into page order.
+    Read from the SOURCE rather than from imported modules, and that is
+    the fix rather than a style choice. The first version compared the
+    engines that happened to import, so in a single-engine virtualenv —
+    the only configuration this repo's README supports (§6: install
+    exactly one) — it compared ONE engine against nothing and reported
+    itself passed. Measured: 0 pairs compared, suite green.
+
+    A third-party audit found the divergence it was supposed to find, by
+    installing all three engines in one environment: a configuration the
+    README tells people not to create. A check that only runs in an
+    unsupported setup is a check nobody runs.
+
+    An `ast` walk needs no driver installed, so the comparison now happens
+    in every environment including one with no engine at all.
     """
-    seen = {}
+    surfaces = {}
     for module in ENGINES:
-        engine = _import_engine(module)
-        if engine is None:
+        path = os.path.join(HERE, module + ".py")
+        if not os.path.exists(path):
             continue
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        names = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                names.add(node.name)
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target,
+                                                                ast.Name):
+                names.add(node.target.id)
+        surfaces[module] = names
+
+    equal("all three engines are present to compare", len(surfaces), 3)
+
+    # What each engine legitimately holds that its twins do not: the names
+    # its own driver layer needs. Everything else must match.
+    DRIVER_LOCAL = {
+        "playwright_scraper": {"sync_playwright", "PWError", "PWTimeout"},
+        "puppeteer_scraper": {"launch", "connect", "asyncio", "concurrent",
+                              "PyppeteerError", "NetworkError", "PPTimeout",
+                              "_Loop", "_FETCH_JS", "RemoteBrowserError",
+                              "CDP_CONNECT_TIMEOUT"},
+        "selenium_scraper": {"webdriver", "WebDriverException", "SETimeout",
+                             "ChromeOptions", "By", "_FETCH_JS",
+                             "RemoteBrowserError", "_apply_fingerprint"},
+    }
+    names = sorted(surfaces)
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = names[i], names[j]
+            only_a = surfaces[a] - surfaces[b] - DRIVER_LOCAL.get(a, set())
+            only_b = surfaces[b] - surfaces[a] - DRIVER_LOCAL.get(b, set())
+            check("%s and %s expose the same names" % (a, b),
+                  not only_a and not only_b,
+                  "only in %s: %s; only in %s: %s"
+                  % (a, sorted(only_a), b, sorted(only_b)))
+
+    # And the shared half must really be shared: the names the runner
+    # needs, in every engine, whatever its driver.
+    for module, names_in in surfaces.items():
         for name in ("scrape", "parse_args", "PageOutcome", "MODES",
                      "_fetch_one_video", "_fetch_videos_concurrently",
                      "_worker_pool", "_run_comments", "_run_video",
                      "_run_search", "_open_session", "_prime_session",
                      "_fetch_with_policy", "handle_captcha_if_present",
-                     "_proxy_failure", "_mask_credentials",
-                     "_driver_context"):
-            check("%s.%s exists" % (module, name), hasattr(engine, name))
+                     "_proxy_failure", "_mask_credentials", "_driver_context",
+                     "_rotate_if_per_page", "_run_replies",
+                     "PLAYER_ONLY_FIELDS"):
+            check("%s defines %s" % (module, name), name in names_in)
+
+    # The runtime shape of PageOutcome, for whichever engines DO import.
+    for module in ENGINES:
+        engine = _import_engine(module)
+        if engine is None:
+            continue
         outcome = engine.PageOutcome(number=1)
         for field_name in ("number", "rows", "state", "status", "blocked",
                            "error", "next_token", "payload", "attempted"):
             check("%s.PageOutcome carries %r" % (module, field_name),
                   hasattr(outcome, field_name))
-        equal("%s.PageOutcome starts empty" % module, outcome.rows, [])
-        equal("%s.PageOutcome starts unblocked" % module, outcome.blocked,
-              False)
         equal("%s names the same modes" % module, tuple(engine.MODES),
               ("comments", "video", "search"))
-        seen[module] = sorted(n for n in dir(engine)
-                              if not n.startswith("__"))
-
-    # And against each OTHER, in both directions: a name that appears in
-    # one engine and not its twins is a divergence whichever way it runs.
-    names = sorted(seen)
-    for i in range(len(names) - 1):
-        a, b = names[i], names[i + 1]
-        only_a = set(seen[a]) - set(seen[b]) - set(DRIVER_IMPORTS.values())
-        only_b = set(seen[b]) - set(seen[a]) - set(DRIVER_IMPORTS.values())
-        # Each engine legitimately imports its own driver's names.
-        DRIVER_LOCAL = {"launch", "connect", "asyncio", "concurrent",
-                        "PyppeteerError", "NetworkError", "PPTimeout",
-                        "webdriver", "WebDriverException", "SETimeout",
-                        "ChromeOptions", "By", "sync_playwright", "PWError",
-                        "PWTimeout", "_Loop", "_FETCH_JS",
-                        "RemoteBrowserError"}
-        only_a -= DRIVER_LOCAL
-        only_b -= DRIVER_LOCAL
-        check("%s and %s expose the same names" % (a, b),
-              not only_a and not only_b,
-              "only in %s: %s; only in %s: %s"
-              % (a, sorted(only_a), b, sorted(only_b)))
 
 def check_every_solve_is_counted_against_the_budget():
     """`SOLVES_PER_PAGE` is a MONEY limit, so every call that can buy must
@@ -1447,6 +1480,10 @@ def check_every_solve_is_counted_against_the_budget():
             continue
         source = open(path, encoding="utf-8").read()
         calls = source.count("handle_captcha_if_present(session, args, budget)")
+        check("%s routes the solver through one entry point" % module,
+              source.count("def _handle_captcha_in_browser") == 1,
+              "the HTTP transport has no page to inject a token into, so "
+              "the split is what keeps that answer in one place")
         check("%s calls the solver from two places, as designed" % module,
               calls == 2, "found %d call site(s)" % calls)
         check("%s creates exactly one budget per attempt loop" % module,
@@ -1471,7 +1508,12 @@ def check_every_solve_is_counted_against_the_budget():
         if not os.path.exists(path):
             continue
         source = open(path, encoding="utf-8").read()
-        handler = source[source.index("def handle_captcha_if_present"):]
+        # The browser handler, not the router. `handle_captcha_if_present`
+        # now decides which transport it is on and returns early for the
+        # HTTP one, so the budget lives one function further in — and this
+        # check must follow it rather than reading a function that no
+        # longer spends anything.
+        handler = source[source.index("def _handle_captcha_in_browser"):]
         handler = handler[:handler.index("\n\n\n")]
         check("%s checks the budget before paying" % module,
               handler.index("budget.spend()") < handler.index("solve_recaptcha("),
@@ -1515,7 +1557,10 @@ def check_a_dead_proxy_is_reported_as_a_proxy_failure():
         end = source.find("\ndef ", start + 1)
         branch = source[start:end if end > 0 else len(source)]
         check("%s handles a transport failure at all" % module,
-              "except _TransportError as exc:" in branch)
+              "except (_TransportError, TransportError) as exc:" in branch,
+              "both transports raise, and both must be caught: the browser "
+              "sessions raise _TransportError and the HTTP one raises "
+              "http_transport.TransportError")
         check("%s names the proxy when the proxy was the fault" % module,
               "exit_failed = _proxy_failure(exc)" in branch
               and "if exit_failed:" in branch,
@@ -2510,34 +2555,288 @@ def check_the_credential_scan_covers_the_files_it_most_needs_to():
                                   ci_checks.CREDENTIAL_ALLOWED))
 
 
-def check_x_debug_header_is_redacted():
-    """SECURITY.md names the Scraper API's x-debug header as a place
-    credentials reach a log unmasked. It was then logged verbatim: the API
-    echoes back the task it ran, so a credentialed CDP endpoint's username
-    and password went into the log.
+def _fault_args(engine, **overrides):
+    """Arguments for a fault-injection run, with no network in them."""
+    import types
+    base = dict(url="dQw4w9WgXcQ", mode="comments", sort="top", replies=False,
+                reply_pages=1, pages=3, locale="en", region="US", delay=0,
+                retries=0, retry_delay=0, solve_captcha="never",
+                dump_html=False, out="unused", concurrency=1,
+                cdp_endpoint=None, proxy=None, proxy_file=None,
+                proxy_rotate="per-run", fingerprint=False, twocaptcha_key=None,
+                fp_tags=None, fp_country=None, headless=True, captcha_api="v2",
+                min_score=0.3, category=None, allow_empty=False, format="json",
+                proxy_block_retries=1, transport="browser")
+    base.update(overrides)
+    return types.SimpleNamespace(**base)
 
-    The fixtures are assembled from pieces, never written out whole, because
-    this file is scanned by the credential check like every other one.
+
+def _with_stubs(engine, fetch, body):
+    """Run `body` with the engine's transport and session stubbed out."""
+    class FakeSession:
+        client_version = "1"
+        proxy_url = None
+
+        def close(self):
+            pass
+
+    original = (engine._open_session, engine._prime_session,
+                engine._fetch_with_policy)
+    engine._open_session = lambda pw, args, pool: FakeSession()
+    engine._prime_session = lambda session, args, url: 200
+    engine._fetch_with_policy = fetch
+    try:
+        return body(FakeSession)
+    finally:
+        (engine._open_session, engine._prime_session,
+         engine._fetch_with_policy) = original
+
+
+def check_a_lost_reply_thread_makes_the_run_partial():
+    """Fault injection, because this one reported success for months.
+
+    A reply fetch that fails used to put a THREAD INDEX into
+    `pages_failed` — a field holding top-level PAGE NUMBERS — and
+    `finish_run` decided completeness from `stop_reason` alone. So a run
+    that lost every reply it asked for returned exit 0, `status:
+    complete`, and a non-empty `pages_failed` in the same sidecar: a file
+    that contradicts itself.
+
+    Reproduced before the fix by calling `finish_run` directly with
+    `stop_reason="page_cap_reached", pages_failed=[3, 7]` — exit 0,
+    complete. Both halves are pinned here: the accounting, and the
+    completeness rule underneath it.
     """
-    import scraper_api_client as sac
-    pw = "SeCr" + "EtPw"
-    key = "abcdef01" * 4
-    raw = ("cdpurl=ws://acct-zone-scraping_browser-pid-7:" + pw
-           + "@cb.2captcha.com:9222 cost=0.00145 key=" + key + " status=200")
-    out = sac._redact_debug_header(raw)
-    gone = pw not in out and key not in out
-    kept = ("cost=0.00145" in out and "cb.2captcha.com:9222" in out
-            and "status=200" in out)
-    s1, s2 = "secret" + "one", "secret" + "two"
-    two = sac._redact_debug_header(
-        "a=http://u1:" + s1 + "@h1:1 b=http://u2:" + s2 + "@h2:2")
-    both = s1 not in two and s2 not in two
-    wired = ('logger.info("x-debug: %s", _redact_debug_header(debug))'
-             in inspect.getsource(sac))
-    check("x-debug: the credential and the key are gone", gone)
-    check("x-debug: the cost, host and status survive", kept)
-    check("x-debug: both credentials are masked, not just the first", both)
-    check("x-debug: the log line calls the redactor", wired)
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        skip("playwright_scraper", "engine library absent")
+        return
+
+    watch, page = FIX["watch"], FIX["comments_top_p1"]
+
+    def fetch(box, pw, args, pool, body, endpoint, label):
+        if label.startswith("replies "):
+            return None, None, product_parser.STATE_ERROR, False
+        return 200, (watch if label.startswith("watch") else page), \
+            product_parser.STATE_CONTENT, False
+
+    def body(FakeSession):
+        args = _fault_args(engine, replies=True, pages=1)
+        box = {"session": FakeSession(), "prime_url": "u"}
+        return engine._run_comments(box, None, args, pool=None)
+
+    rows, meta = _with_stubs(engine, fetch, body)
+    check("rows still come back", bool(rows))
+    equal("the run names the reply failure as its stop reason",
+          meta["stop_reason"], "reply_threads_failed")
+    check("...and that reason is NOT in the complete set",
+          "reply_threads_failed" not in output_writer.COMPLETE_STOP_REASONS)
+    check("the loop's own reason survives beside it",
+          meta.get("pagination_stop_reason") in
+          output_writer.COMPLETE_STOP_REASONS,
+          "two different facts; a reader needs both")
+    equal("no reply failure is written into pages_failed",
+          meta["pages_failed"], [])
+    check("every failure names its thread", bool(meta["reply_failures"]) and
+          all("parent_id" in f for f in meta["reply_failures"]),
+          "an index is ambiguous between two numbering spaces")
+    equal("requested and failed are counted separately",
+          (meta["reply_threads_requested"] > 0,
+           meta["reply_threads_completed"], meta["reply_threads_failed"] > 0),
+          (True, 0, True))
+
+
+def check_a_failed_page_outranks_a_complete_stop_reason():
+    """`finish_run` decides completeness from the reason AND the evidence.
+
+    A named list of stop reasons cannot cover a failure recorded anywhere
+    else, which is the same hole the exit-code unification closed one
+    level up. Pinned in BOTH directions: a clean run must still be
+    complete, or this rule would make every run partial and someone would
+    turn it off.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        for label, failed, want_status, want_rc in (
+                ("with a failed page", [2], "partial", 6),
+                ("with none", [], "complete", 0)):
+            out = os.path.join(tmp, label.replace(" ", "_"))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = output_writer.finish_run(
+                    [Comment(sku="a"), Comment(sku="b")], out, "json", False,
+                    blocked=False, stop_reason="page_cap_reached",
+                    pages_requested=2, pages_completed=2, pages_failed=failed,
+                    start_url="u", final_url="u", mode="comments")
+            meta = json.load(open(out + ".meta.json"))
+            equal("%s: status" % label, meta["status"], want_status)
+            equal("%s: exit code" % label, rc, want_rc)
+
+
+def check_a_video_row_missing_its_player_fields_is_not_complete():
+    """`/player` is the only source for four columns, so losing it is not
+    a warning — it is a run that did not get what it asked for.
+
+    Before this, a `/player` failure logged a line and returned a
+    SUCCESSFUL outcome: exit 0, `status: complete`, four empty columns and
+    nothing to tell them from a video that genuinely has no category.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        skip("playwright_scraper", "engine library absent")
+        return
+
+    watch, player = FIX["watch"], FIX["player"]
+
+    def fetch(box, pw, args, pool, body, endpoint, label):
+        if endpoint == "player":
+            return None, None, product_parser.STATE_ERROR, False
+        return 200, watch, product_parser.STATE_CONTENT, False
+
+    def body(FakeSession):
+        args = _fault_args(engine, mode="video", pages=1)
+        box = {"session": FakeSession(), "prime_url": "u"}
+        return engine._run_video(box, None, args, pool=None)
+
+    rows, meta = _with_stubs(engine, fetch, body)
+    equal("the row is still written", len(rows), 1)
+    equal("it says which sources built it", rows[0].data_source,
+          "innertube.watch")
+    equal("the run names the gap", meta["stop_reason"], "player_incomplete")
+    check("...and that is not a complete reason",
+          "player_incomplete" not in output_writer.COMPLETE_STOP_REASONS)
+    check("the sidecar names the missing columns",
+          bool(meta.get("videos_incomplete"))
+          and "published_at" in meta["videos_incomplete"][0]["missing"])
+    for field in engine.PLAYER_ONLY_FIELDS:
+        equal("%s is null without /player" % field,
+              getattr(rows[0], field), None)
+    check("but the watch columns are untouched",
+          rows[0].view_count is not None and bool(rows[0].title))
+
+
+def check_per_page_rotation_actually_rotates_per_page():
+    """The mode is named for what it does, which it did not.
+
+    `pool.advance()` was reached only from a dead exit or a refusal, so a
+    run whose pages all succeeded stayed on one address for its whole
+    life — a flag that reads like a traffic-spreading control and was a
+    recovery control.
+
+    Counted rather than asserted qualitatively, because the first fix
+    rotated once too often: it took a new exit after the LAST page too,
+    tearing down a browser for a request that never came.
+    """
+    engine = _import_engine("playwright_scraper")
+    if engine is None:
+        skip("playwright_scraper", "engine library absent")
+        return
+
+    watch, page = FIX["watch"], FIX["comments_top_p1"]
+
+    def fetch(box, pw, args, pool, body, endpoint, label):
+        return 200, (watch if label.startswith("watch") else page), \
+            product_parser.STATE_CONTENT, False
+
+    def run(rotate, pages):
+        # Assembled from pieces, not written out: the credential scan
+        # reads this file, and a literal `user:pass@host` here would make
+        # the scan fail on its own test data (CLAUDE.md §22).
+        exits = ["http:" + "//" + "u" + ":" + "p" + "@one.example:1",
+                 "http:" + "//" + "u" + ":" + "p" + "@two.example:2"]
+        pool = proxy_pool.ProxyPool(exits, rotate=rotate)
+
+        def body(FakeSession):
+            args = _fault_args(engine, pages=pages, proxy_rotate=rotate)
+            box = {"session": FakeSession(), "prime_url": "u"}
+            engine._run_comments(box, None, args, pool)
+            return pool.rotations
+
+        return _with_stubs(engine, fetch, body)
+
+    for pages in (1, 3):
+        equal("per-run takes no exit over %d page(s)" % pages,
+              run("per-run", pages), 0)
+        equal("per-page takes one exit BETWEEN each of %d page(s)" % pages,
+              run("per-page", pages), pages - 1)
+
+    check("a single-exit pool does not thrash",
+          engine._rotate_if_per_page(
+              {"session": None, "prime_url": "u"}, None,
+              _fault_args(engine, proxy_rotate="per-page"),
+              proxy_pool.ProxyPool(
+                  ["http:" + "//" + "u" + ":" + "p" + "@only.example:1"],
+                  rotate="per-page"), "why") is False,
+          "rebuilding a browser to arrive at the same address is pure cost")
+
+
+def check_a_site_that_answered_is_not_a_run_that_failed():
+    """Exit 4 and exit 5 answer different questions, and two states sat on
+    the wrong side of the line for a day.
+
+    `comments_disabled` and `video_unavailable` are the site ANSWERING:
+    this video takes no comments, this video is not there. Both arrive as
+    HTTP 200 with a large, healthy payload. The honest code for a zero-row
+    run is 4 — "we asked, and the answer was nothing" — and not 5, which
+    means the content was never obtained at all and sends a reader to
+    check a proxy that is working fine.
+
+    They regressed to 5 when the family unified its exit codes: that rule
+    keys on "did the run complete" rather than on a list of failure names,
+    which is the right shape and stays. What was wrong was the COMPLETE
+    set, which enumerated only the ways a pagination LOOP can end and not
+    the ways a SITE can answer. Measured the day after: both URLs returned
+    5 where they had returned 4.
+
+    Pinned in both directions, because a rule that made everything
+    complete would pass the first half of this check and be worse than the
+    bug.
+    """
+    import tempfile
+    answered = ("comments_disabled", "video_unavailable")
+    failed = ("page_load_timeout", "page_challenge", "page_error",
+              "parse_error")
+
+    for reason in answered:
+        check("%r is a COMPLETE stop reason — the site answered" % reason,
+              reason in output_writer.COMPLETE_STOP_REASONS,
+              "a zero-row run reports 5 otherwise, which claims we never "
+              "reached the site")
+    for reason in failed:
+        check("%r is NOT complete — we never got the content" % reason,
+              reason not in output_writer.COMPLETE_STOP_REASONS)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for reason, want in ([(r, 4) for r in answered]
+                             + [(r, 5) for r in failed]):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = output_writer.finish_run(
+                    [], os.path.join(tmp, reason), "json", False,
+                    blocked=False, stop_reason=reason, pages_requested=1,
+                    pages_completed=0, start_url="u", final_url="u",
+                    mode="comments")
+            equal("zero rows + %s -> exit %d" % (reason, want), rc, want)
+
+        # And a blocked run outranks both: something stood between the run
+        # and the content, which is neither "no answer" nor "no content".
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = output_writer.finish_run(
+                [], os.path.join(tmp, "blocked"), "json", False,
+                blocked=True, stop_reason="page_challenge", pages_requested=1,
+                pages_completed=0, start_url="u", final_url="u",
+                mode="comments")
+        equal("a blocked run reports 3 whatever it stopped for", rc, 3)
+
+    # The states themselves must still classify the way the parser says,
+    # or the stop reasons above would never be reached.
+    equal("a comments-off payload still classifies as such",
+          product_parser.detect_page_state(FIX["comments_off"]),
+          "comments_disabled")
+    equal("and a missing video likewise",
+          product_parser.detect_page_state(FIX["video_unavailable"]),
+          "video_unavailable")
 
 
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")

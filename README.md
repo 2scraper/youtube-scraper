@@ -13,9 +13,18 @@ read from the endpoint YouTube's own front end calls.
 ```bash
 git clone https://github.com/2scraper/youtube-scraper.git
 cd youtube-scraper
-python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt -r requirements-playwright.txt
-./.venv/bin/playwright install chromium
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 ./.venv/bin/python playwright_scraper.py --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --pages 3
+```
+
+**No browser is installed above, and none is started.** The endpoint this
+reads answers plain HTTPS, so `--transport auto` — the default — never
+opens one unless the site refuses. Install an engine when you want the
+fallback to have something to fall back to:
+
+```bash
+./.venv/bin/pip install -r requirements-playwright.txt
+./.venv/bin/playwright install chromium
 ```
 
 ```
@@ -84,6 +93,38 @@ That sentence is in this README because the alternative is you discovering
 it from a dashboard.
 
 ---
+
+## Transports
+
+```bash
+--transport auto      # default: plain HTTPS, a browser only if refused
+--transport http      # never start a browser; report a refusal instead
+--transport browser   # always drive one (what this repo did before v0.2.0)
+```
+
+Measured end to end on 2026-09-22, two pages of comments, median of three
+runs on one machine — identical rows either way:
+
+| | wall clock |
+|---|---|
+| `--transport http` | **2.0 s** |
+| `--transport auto` | **2.0 s** |
+| `--transport browser` | 3.4 s |
+
+The fetch alone is 0.9 s against 3.1 s; the table shows the figure you
+actually feel, which is a smaller ratio because process start, parsing and
+writing cost the same on either path.
+
+`auto` starts a browser the first time a response classifies as a
+challenge, and then stays on it for the rest of the run — a site that
+refused once will refuse again, and flapping would pay the start-up cost
+on every page. An HTTP client has nowhere to put a solved captcha token,
+so `--transport http` reports a refusal rather than trying to clear it.
+
+`--cdp-endpoint` implies `browser`. `--fingerprint` is ignored on the HTTP
+transport and says so: an HTTP client cannot carry User-Agent Client
+Hints, so it could only wear half an identity, which is measurably worse
+than none.
 
 ## Modes
 
@@ -165,7 +206,15 @@ timestamps, the flags, the video.
 needs no bookkeeping: `parent_id` is derived from `sku`.
 
 **Exit codes**: `0` ok · `1` crash · `2` bad usage · `3` blocked · `4` no
-comments · `5` remote API error · `6` partial. Every run writes
+comments · `5` the content was never obtained · `6` partial.
+
+**A run is `complete` only if nothing failed.** That includes reply threads
+and the `/player` call: if `--replies` asked for twenty threads and three
+did not come back, or if the second call a `--mode video` run makes never
+answered, the run is `partial` and exits `6` — even though every top-level
+page arrived. The sidecar names what was lost (`reply_failures` with the
+parent comment id, `videos_incomplete` with the columns) rather than
+leaving a reader to infer it from a null. Every run writes
 `<out>.meta.json` beside its output; a failed run writes none, so a
 `"failed"` sidecar can never sit next to good data.
 
