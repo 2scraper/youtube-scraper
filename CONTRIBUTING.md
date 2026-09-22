@@ -275,3 +275,19 @@ than a bug fix.
 ## Licence
 
 MIT. By opening a pull request you agree your contribution ships under it.
+
+## The `§` references in the comments
+
+Comments and docstrings here cite section numbers — "CLAUDE.md §18", "§24".
+That file is the 2scraper family's internal conventions document and is
+deliberately **not** in this repository: it applies to every scraper in the
+family and is not specific to this one.
+
+Nothing is lost by not having it. The rule a reference points at is always
+written out in full beside the reference, because a comment whose reasoning
+lives somewhere else is not a comment. Read the `§` as provenance — "this
+paragraph exists because it cost another repo real time" — and the sentence
+around it as the whole of the argument.
+
+If you find a reference whose reasoning is NOT spelled out beside it, that
+is a bug in the comment; please open an issue.

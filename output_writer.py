@@ -55,8 +55,11 @@ Everything below the dataclasses is row-class-agnostic: pass `row_cls` so
 an empty CSV still gets the right header for the mode that produced it.
 """
 
+import contextlib
 import csv
 import json
+import os
+import tempfile
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime, timezone
 from typing import Optional, List, Set, Sequence, Any, Type
@@ -337,8 +340,50 @@ def _csv_value(v: Any) -> Any:
     return v
 
 
+@contextlib.contextmanager
+def _atomic(path: str, newline: Optional[str] = None):
+    """Write to a temporary file beside `path`, then rename over it.
+
+    Every write here replaces a file a previous run may have left, and the
+    invariant this module exists to protect is that a bad run never
+    destroys last night's good data (`save` refuses to overwrite with an
+    empty result for the same reason). Writing in place gives that up at
+    the worst moment: a kill, a full disk or a crash halfway through
+    `json.dump` leaves a TRUNCATED file where a complete one was, and the
+    sidecar beside it still describes the old, good run.
+
+    `os.replace` is atomic on POSIX and on Windows, so a reader sees
+    either the whole previous file or the whole new one and never half of
+    either. The temporary file is created in the SAME directory, because a
+    rename across filesystems is not atomic and would silently degrade to
+    a copy.
+
+    `fsync` before the rename is what makes that true after a power loss
+    rather than only after a crash — without it the rename can reach the
+    disk before the bytes do.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", newline=newline, dir=directory,
+        prefix=os.path.basename(path) + ".", suffix=".tmp", delete=False)
+    try:
+        with handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(handle.name, path)
+    except BaseException:
+        # Leave the destination untouched. A failed write must not be
+        # visible at all, which is the whole point of writing aside.
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
 def write_json(rows: Sequence[Any], path: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
+    with _atomic(path) as f:
         json.dump([asdict(r) for r in rows], f, ensure_ascii=False, indent=2)
 
 
@@ -351,7 +396,7 @@ def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Comment) -> None:
     # The header comes from `row_cls`, not from the first row, so an empty
     # run still writes the columns of the mode that produced it.
     fieldnames = [f.name for f in fields(row_cls)]
-    with open(path, "w", encoding="utf-8", newline="") as f:
+    with _atomic(path, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in rows:
@@ -449,7 +494,11 @@ def write_run_meta(out_prefix: str, meta: dict) -> str:
     both complete, and between runs of different `mode`.
     """
     path = f"{out_prefix}.meta.json"
-    with open(path, "w", encoding="utf-8") as f:
+    # Atomic for the same reason the row files are, and one reason more:
+    # this file is what a consumer branches on, so a truncated sidecar is
+    # worse than none at all — it parses as far as it parses and then
+    # raises, next to data that is perfectly fine.
+    with _atomic(path) as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
     print(f"[+] Wrote run metadata -> {path} (status={meta.get('status')})")
     return path
@@ -600,9 +649,29 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # has. CLAUDE.md §21 — complete and exhaustive are different words — and
 # the sidecar records the site's own total beside the collected count so a
 # consumer is not left inferring one from the other.
+# `comments_disabled` and `video_unavailable` are in this set, and they
+# have to be. Both describe a run that ASKED and got a real answer — the
+# video takes no comments, or the video is not there — so the honest code
+# for a zero-row run is 4 ("we asked, and the answer was nothing") and not
+# 5 ("we never got the content").
+#
+# Left out, they cost exactly that: measured 2026-09-22, both returned
+# exit 5, where the same two URLs returned 4 the day before. The exit-5
+# rule that introduced it is right and stays — it keys on `not complete`
+# rather than on a list of failure names, precisely so a new reason cannot
+# fall silently through to "the catalogue is empty". What was wrong was
+# this set, which described only the ways a PAGINATION LOOP can end and
+# not the ways a site can answer.
+#
+# The lesson generalises past these two names: when a rule keys on "is
+# this reason complete", every reason has to be classified, including the
+# ones that are complete answers about an empty result. A reason nobody
+# added here defaults to "we failed", which is the opposite of silent but
+# is still wrong.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "page_cap_reached", "page_echo_mismatch",
-                         "single_page_route")
+                         "single_page_route",
+                         "comments_disabled", "video_unavailable")
 
 
 def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
@@ -623,7 +692,23 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     does not overwrite) — the two files would contradict each other, and
     diff_runs.py would refuse to compare data that is in fact fine.
     """
-    complete = stop_reason in COMPLETE_STOP_REASONS
+    # Completeness is decided by the reason AND by the evidence, and the
+    # second half is the fix. `stop_reason` is a NAMED LIST, and a named
+    # list cannot cover a failure that was recorded somewhere else — which
+    # is exactly what happened: a run whose top-level pages all arrived
+    # stops for `page_cap_reached`, a COMPLETE reason, while
+    # `pages_failed` holds the reply threads that did not. Measured before
+    # the fix: `finish_run(rows, stop_reason="page_cap_reached",
+    # pages_failed=[3, 7])` returned exit 0 with `status: complete` and a
+    # two-entry `pages_failed` in the same sidecar — a file that
+    # contradicts itself, and a pipeline that branches on `status` reading
+    # a short run as a whole one.
+    #
+    # Same shape as the exit-code unification this file already carries: a
+    # rule keyed on a list of names has a hole for every name nobody added
+    # to it, so key on the thing that is actually true instead. If a page
+    # failed, the run is not complete, whatever it stopped for.
+    complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
     row_cls = ROW_CLASS_BY_MODE.get(mode, Comment)
     rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls)
     wrote_output = bool(rows) or allow_empty

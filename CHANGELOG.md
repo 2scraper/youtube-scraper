@@ -9,6 +9,92 @@ mean every flag is frozen. Where a patch changes a default that costs money
 or changes what a column means, the entry leads with that in a blockquote
 rather than leaving it to be discovered from a bill or a chart.
 
+## [0.2.0] — 2026-09-22
+
+Written after a third-party audit. Four of its findings were correctness
+defects that reported SUCCESS, which is this codebase's most expensive bug
+class — no test failed, no run crashed, and the output looked right.
+
+> **If you branch on `status` or on the exit code, read this.** A run that
+> lost reply threads, or whose `--mode video` second call failed, used to
+> report `status: complete` and exit `0`. It now reports `partial` and
+> exit `6`. Pipelines that treated `complete` as "everything arrived" were
+> being told something untrue; pipelines that treat `6` as a hard error
+> will now see runs they previously saw as clean.
+
+### Fixed
+
+- **A run with failed pages called itself complete.** `finish_run` decided
+  completeness from `stop_reason` alone, and a named list of reasons
+  cannot cover a failure recorded anywhere else. Reproduced directly:
+  `stop_reason="page_cap_reached", pages_failed=[3, 7]` returned exit 0
+  and `status: complete` with both failures listed in the same sidecar.
+  Completeness now consults the evidence as well as the reason. Measured
+  across the family by CALLING each repo's `finish_run` rather than
+  grepping: 28 of 32 behaved this way.
+- **Lost reply threads were invisible.** A failed reply fetch put a thread
+  INDEX into `pages_failed`, a field holding top-level page NUMBERS — so
+  `[3, 7]` could mean either and nothing said which. Replies are now
+  accounted for separately: `reply_threads_requested`, `…_completed`,
+  `…_failed`, and a `reply_failures` list naming each thread by its parent
+  comment id, depth and state. Any failure makes the run partial;
+  `pagination_stop_reason` keeps the loop's own reason beside it, because
+  "we reached the page cap" and "three threads failed" are two facts.
+- **A half-built video row reported success.** When `/player` did not
+  answer, `--mode video` logged a warning and returned a successful
+  outcome with `published_at`, `duration_seconds`, `category` and
+  `keywords` all null — indistinguishable from a video that genuinely has
+  none. The row now records which sources built it (`innertube.watch`
+  against `innertube.watch+player`), the sidecar names the missing
+  columns, and the run is partial.
+- **`--proxy-rotate per-page` did not rotate per page.** `pool.advance()`
+  was reached only from a dead exit or a refusal, so a run whose pages all
+  succeeded stayed on one address for its entire life. It now takes a new
+  exit between pages, in all three modes — and exactly N-1 times for N
+  pages, not N: the first version rotated after the last page too and
+  built a browser for a request that never came.
+- **The Scraper API client wrote no sidecar**, while the README promised
+  one beside every run that wrote output. It now calls `finish_run` like
+  the engines, and records `player_fields_unreachable` — those columns are
+  missing by ROUTE there (the service issues a GET; `/player` is a POST),
+  which is a different fact from the engines' failure and should not read
+  as one.
+- **Output files are written atomically.** A kill or a full disk during a
+  write used to leave a truncated file where a complete one had been, with
+  a sidecar beside it still describing the old run. Writes now go to a
+  temporary file in the same directory, are flushed and fsynced, and are
+  renamed over the destination — so a reader sees the whole previous file
+  or the whole new one.
+- **The cross-engine surface check never ran.** It compared engines that
+  IMPORTED, and a supported virtualenv holds exactly one (§6 says install
+  one), so it compared one engine against nothing and reported itself
+  passed — 0 pairs, suite green. The audit found real divergence only by
+  installing all three, a configuration the README tells people not to
+  create. The comparison now reads the source, so it runs everywhere
+  including with no engine installed, and it immediately found the drift:
+  one method named `_apply_client_hints` in one engine and
+  `_apply_fingerprint` in the others.
+
+### Added
+
+- **`--transport auto|http|browser`**, defaulting to `auto`. The endpoint
+  this repo reads answers plain HTTPS, which the README has said since
+  0.1.0 while every run started Chromium anyway. Measured end to end, two
+  pages, median of three: **2.0 s over HTTP against 3.4 s through a
+  browser**, identical rows. `auto` starts a browser the first time a
+  response classifies as a challenge and stays on it for the rest of the
+  run. A browser is no longer needed to install or to use.
+- Fault-injection checks for all four correctness fixes above, each
+  driving the engine with the transport stubbed out, and each verified by
+  planting the fault back and watching the suite go red.
+
+### Notes
+
+- One `--transport http` run in nine returned exit 1 during testing, once,
+  and did not reproduce in eight further attempts. Recorded rather than
+  explained away: it is either a transient network fault or something not
+  yet understood.
+
 ## [0.1.0] — 2026-09-21
 
 First release. Three modes, three browser engines, and a Scraper API
@@ -89,4 +175,5 @@ timestamps, badges, the video and its publisher — is untouched. A comment
 is a person's writing, and republishing it is a separate act from YouTube
 showing it on its own page.
 
+[0.2.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.2.0
 [0.1.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.1.0

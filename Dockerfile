@@ -4,7 +4,7 @@
 #
 #   docker build -t youtube-scraper .
 #   docker run --rm -v "$PWD/out:/out" youtube-scraper \
-#     --mode listings \
+#     --mode comments \
 #     --pages 3 --out /out/software-engineer
 #
 # Pass --proxy/--twocaptcha-key the same way as running locally, or mount a
@@ -26,8 +26,8 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-playwright.tx
 # with ModuleNotFoundError on every invocation INCLUDING `--help` — a broken
 # container that nothing in the repo would have noticed.
 COPY captcha_solver.py env_config.py fingerprint_client.py output_writer.py \
-     page_flow.py playwright_scraper.py product_parser.py proxy_pool.py \
-     diff_runs.py ./
+     http_transport.py page_flow.py playwright_scraper.py product_parser.py \
+     proxy_pool.py diff_runs.py ./
 
 ENTRYPOINT ["python3", "playwright_scraper.py"]
 CMD ["--help"]

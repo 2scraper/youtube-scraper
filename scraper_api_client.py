@@ -59,7 +59,7 @@ import requests
 from product_parser import (client_version_from_text, detect_bot_challenge,
                             is_supported_url, parse_video,
                             video_id_from_url)
-from output_writer import Video, save, utc_now
+from output_writer import Video, finish_run, utc_now
 import env_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -308,9 +308,39 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                     "the three browser engines, which need no key.",
                     f"{row.comment_count:,}")
 
-    return save([row], args.out, args.format, allow_empty=args.allow_empty,
-                row_cls=Video)
+    # `finish_run`, not `save`. The README promises a `<out>.meta.json`
+    # beside every run that wrote output, and this client wrote none —
+    # so a consumer that branches on the sidecar had one code path that
+    # silently had nothing to read, and `diff_runs.py` refused every pair
+    # involving a Scraper API run because it could not find a status.
+    #
+    # `single_page_route` is COMPLETE here, and the distinction matters:
+    # the browser engines call a run with empty `/player` columns PARTIAL,
+    # because for them those columns are a second request that failed. On
+    # this path there is no second request to fail — the service issues a
+    # GET and `/player` is a POST — so the columns are unreachable BY
+    # ROUTE rather than missing. `player_fields_unreachable` says which it
+    # is, instead of letting a reader infer a fault from a null.
+    return finish_run([row], args.out, args.format,
+                      allow_empty=args.allow_empty, blocked=False,
+                      stop_reason="single_page_route",
+                      pages_requested=1, pages_completed=1,
+                      start_url=args.url, final_url=args.url,
+                      mode="video", extra={
+                          "engine": "scraper_api",
+                          "category": args.category,
+                          "player_fields_unreachable": list(
+                              PLAYER_ONLY_FIELDS),
+                          "upstream_status": upstream_status,
+                      })
 
+
+# The columns this route cannot reach, named rather than left as four
+# nulls a reader has to guess about. The browser engines carry the same
+# tuple and treat it as a FAILURE when it is empty; here it is a property
+# of the transport.
+PLAYER_ONLY_FIELDS = ("published_at", "duration_seconds", "category",
+                      "keywords")
 
 _INITIAL_DATA_MARKERS = ("var ytInitialData = ", "window[\"ytInitialData\"] = ",
                          "ytInitialData = ")
