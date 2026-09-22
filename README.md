@@ -1,5 +1,6 @@
 # youtube-scraper
 
+[![release](https://img.shields.io/github/v/release/2scraper/youtube-scraper?sort=semver)](https://github.com/2scraper/youtube-scraper/releases)
 [![tests](https://github.com/2scraper/youtube-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/youtube-scraper/actions/workflows/tests.yml)
 [![canary](https://github.com/2scraper/youtube-scraper/actions/workflows/canary.yml/badge.svg)](https://github.com/2scraper/youtube-scraper/actions/workflows/canary.yml)
 [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.13-blue)](pyproject.toml)
