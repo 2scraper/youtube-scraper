@@ -10,26 +10,21 @@ body:
         mask credentials in their own logs, but raw HTML dumps and the Scraper
         API's `x-debug` header do not. Replace them with `***`.
 
-        Two things answer most reports faster than we can:
+        Three things answer most reports faster than we can:
 
-        - **Everything exit 3?** Check the exit address first. Etsy's
-          DataDome answers every datacentre and VPN IP with HTTP 403, so a run
-          from a VPS or a CI runner is blocked whatever else is set. If the
-          log says `t=bv`, a captcha key does not help — that challenge is
-          not solvable. The Scraping Browser API (`--cdp-endpoint`) is the
-          path that works; if a profile keeps refusing after three retries,
-          try a different `pid`.
-        - **Zero products?** You may be on a page that has none — a taxonomy
-          hub, or one page past the end of a listing. It answers 200 with
-          nothing on it, which is exit 4 and a correct answer. See
+        - **Exit 3?** That has never been observed on this site: YouTube's
+          comment endpoint answered 60 consecutive pages from a bare
+          datacentre address with no refusal. So it is news, and the dumped
+          payload is the evidence. Check for a 429 first — that is a rate
+          limit, and the fix is `--delay`, not a proxy.
+        - **Zero comments?** Comments may be turned off, or the video may be
+          private or deleted. Both answer HTTP 200 with a large payload and
+          exit 4, which is a correct answer. See
           [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
-        - **`rating` empty on every row?** That is expected on a listing run:
-          Etsy publishes no per-listing rating there. The stars you see on a
-          tile are the shop's and are in `shop_rating`. See the README.
-        - **Wrong currency or language?** Etsy decides both from your exit
-          IP, not from the URL — a request for `/fr/…` from a German exit is
-          redirected to `/de/…`. The row's `url` says which storefront
-          actually answered.
+        - **Like counts rounded, timestamps relative?** That is expected:
+          YouTube publishes a comment's likes only as `"318K"` and its date
+          only as `"1 year ago"`. See "What this cannot tell you" in the
+          README.
 
   - type: dropdown
     id: engine
@@ -77,8 +72,8 @@ body:
       render: shell
       placeholder: |
         python3 playwright_scraper.py \
-          --url "https://www.etsy.com/search?q=handmade+mug" \
-          --pages 3 --out grills
+          --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+          --pages 3 --out comments
     validations:
       required: true
 
@@ -98,7 +93,7 @@ body:
     attributes:
       label: What you expected instead
       placeholder: >-
-        96 products, as the README says a category page yields.
+        60 comments, as the README says a 3-page run yields.
     validations:
       required: true
 

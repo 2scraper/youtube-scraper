@@ -339,7 +339,7 @@ def check_state_policy():
           page_flow.should_retry("challenge")
           and page_flow.should_solve("challenge")
           and page_flow.counts_as_blocked("challenge"))
-    # A served page we could not read is OUR bug, never "0 jobs" (§20), so
+    # A served page we could not read is OUR bug, never "0 comments" (§20), so
     # it neither counts as blocked nor buys a solve.
     check("parse_error: retried once, never solved, NOT blocked",
           page_flow.should_retry("parse_error")
@@ -393,7 +393,7 @@ def check_policy_constants_have_a_consumer():
               fn in joined, "unused policy")
 
 def check_csv_and_json_writers():
-    from output_writer import Comment as JobPosting, write_csv, write_json
+    from output_writer import Comment, write_csv, write_json
     import product_parser as P
     rows = comments("comments_top_p1")
     # `mentions` is the only list column on a comment row, and it is rare
@@ -404,11 +404,11 @@ def check_csv_and_json_writers():
     rows[0].mentions = ["UCFFFFFFFFFFFFFFFFFFFF01", "UCFFFFFFFFFFFFFFFFFFFF02"]
     with tempfile.TemporaryDirectory() as tmp:
         csv_path = os.path.join(tmp, "out.csv")
-        write_csv(rows, csv_path, row_cls=JobPosting)
+        write_csv(rows, csv_path, row_cls=Comment)
         with open(csv_path, encoding="utf-8") as f:
             reader = list(csv.reader(f))
         equal("CSV header matches the dataclass, in order",
-              reader[0], [f.name for f in fields(JobPosting)])
+              reader[0], [f.name for f in fields(Comment)])
         equal("CSV holds every row", len(reader) - 1, len(rows))
         badges_col = reader[0].index("mentions")
         joined = [r[badges_col] for r in reader[1:] if r[badges_col]]
@@ -418,27 +418,27 @@ def check_csv_and_json_writers():
               not any(cell.startswith("[") for row in reader[1:] for cell in row))
 
         empty_csv = os.path.join(tmp, "empty.csv")
-        write_csv([], empty_csv, row_cls=JobPosting)
+        write_csv([], empty_csv, row_cls=Comment)
         with open(empty_csv, encoding="utf-8") as f:
             header = list(csv.reader(f))
         equal("an EMPTY csv still carries its header", len(header), 1)
         equal("...and it is the right one", header[0],
-              [f.name for f in fields(JobPosting)])
+              [f.name for f in fields(Comment)])
 
         json_path = os.path.join(tmp, "out.json")
         write_json(rows, json_path)
         loaded = json.load(open(json_path, encoding="utf-8"))
         equal("JSON holds every row", len(loaded), len(rows))
         equal("JSON keys are the dataclass fields, in order",
-              list(loaded[0].keys()), [f.name for f in fields(JobPosting)])
+              list(loaded[0].keys()), [f.name for f in fields(Comment)])
         with_list = next(r for r in loaded if r["mentions"])
         check("a list column stays a real list in JSON",
               isinstance(with_list["mentions"], list),
               repr(with_list["mentions"]))
-        # An empty list and a null both mean "no restriction stated", so
-        # both are written as null rather than putting a distinction in the
-        # data that is not in the site.
-        check("...and an unrestricted listing carries null, never []",
+        # An empty list and a null both mean "no @-mention", so both are
+        # written as null rather than putting a distinction in the data
+        # that is not in the site.
+        check("...and a comment with no mention carries null, never []",
               all(r["mentions"] is None
                   or r["mentions"] for r in loaded))
 
@@ -449,14 +449,12 @@ def check_exit_codes():
           (3, 4, 5, 6))
     check("page_cap_reached is a COMPLETE stop reason",
           "page_cap_reached" in O.COMPLETE_STOP_REASONS)
-    # `/explore` and `/careers` are each served at ONE address holding
-    # their whole result set — measured, not assumed: every pagination
-    # parameter tried returned a byte-identical payload — so a run that
-    # stopped after one fetch fetched the whole route.
+    # What a `--mode video` run reports: one video is one response, and
+    # there is no second page of it to miss.
     check("single_page_route is complete by construction AND by measurement",
           "single_page_route" in O.COMPLETE_STOP_REASONS)
     # Carried for the family's shared vocabulary and unreachable here: this
-    # site cannot clamp an out-of-range page back, having only one.
+    # site is never asked for a page by number, so it has no number to echo.
     check("page_echo_mismatch is complete",
           "page_echo_mismatch" in O.COMPLETE_STOP_REASONS)
     check("...and an enumeration that yielded nothing is NOT complete",
@@ -480,33 +478,33 @@ def check_a_run_that_finds_nothing_writes_nothing():
         equal("--allow-empty WRITES the empty file...", 
               json.load(open(prefix + ".json", encoding="utf-8")), [])
         # ...and still reports exit 4. Pinned deliberately (§10: pin a known
-        # behaviour rather than half-guarding it): "zero businesses" is true
+        # behaviour rather than half-guarding it): "zero comments" is true
         # whether or not the file was written, and a caller that wanted the
         # file still wants to know the result was empty.
         equal("...and still reports exit 4, because it IS empty", code, 4)
 
 def check_sidecar_shape():
     from output_writer import run_meta
-    meta = run_meta(status="complete", stop_reason="single_page_route",
-                    pages_requested=1, pages_completed=1, pages_failed=[],
-                    products=390, mode="listings", source="mercor.com",
-                    start_url="https://work.mercor.com/explore",
-                    final_url="https://work.mercor.com/explore",
-                    extra={"records_in_payload": 390, "urls_in_itemlist": 326,
-                           "pages_available": 1, "route_is_paginated": False})
+    meta = run_meta(status="complete", stop_reason="page_cap_reached",
+                    pages_requested=3, pages_completed=3, pages_failed=[],
+                    products=60, mode="comments", source="youtube.com",
+                    start_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    final_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    extra={"total_comments": 2457616, "comments_collected": 60,
+                           "sample_share_pct": 0.0024})
     for key in ("status", "stop_reason", "pages_requested", "pages_completed",
                 "pages_failed", "mode", "source"):
         check("the sidecar records %r" % key, key in meta)
-    equal("the sidecar carries how many records the payload held",
-          meta["records_in_payload"], 390)
-    # Both views, because the response has two and they disagree. Without
-    # the second number a reader cannot tell that the site's own structured
-    # index is 64 entries short of its own payload — which is the whole
-    # reason this scraper does not read that index.
-    equal("...and how many the site's own ItemList indexed",
-          meta["urls_in_itemlist"], 326)
-    equal("...and whether this route is addressable page by page",
-          meta["route_is_paginated"], False)
+    # Both figures, because a complete run is not an exhaustive one (§21):
+    # the README's own 3-page run held 60 of the video's 2,457,616 comments.
+    # Without the site's total beside the collected count a reader cannot
+    # tell a sample from a census.
+    equal("the sidecar carries the site's own comment total",
+          meta["total_comments"], 2457616)
+    equal("...and how many this run collected",
+          meta["comments_collected"], 60)
+    equal("...and the share that is",
+          meta["sample_share_pct"], 0.0024)
     equal("pages_failed is a LIST of numbers, not a count",
           isinstance(meta["pages_failed"], list), True)
 
@@ -622,11 +620,12 @@ def check_shared_calls_bind_against_the_real_signature():
             # A name that is NOT THERE is the loudest possible failure and
             # this check used to swallow it: `getattr(..., None)` returned
             # None, `not callable(None)` was true, and the call was skipped.
-            # Three calls into a page_flow API that does not exist in this
-            # repo -- comparable(), next_page_selector(),
-            # next_page_candidates(), all of them Tokopedia's, all arriving
-            # with copied code -- sat in two engines under a green run of
-            # this very function. Absent is not "nothing to bind".
+            # In a sibling repo (bbb-scraper), three calls into a page_flow
+            # API that did not exist there -- comparable(),
+            # next_page_selector(), next_page_candidates(), all of them
+            # Tokopedia's, all arriving with copied code -- sat in two
+            # engines under a green run of this very function. Absent is
+            # not "nothing to bind".
             if not hasattr(owner, attr):
                 check("%s.%s exists (called from %s:%d)"
                       % (getattr(owner, "__name__", owner), attr,
@@ -1600,7 +1599,7 @@ def check_a_dead_proxy_is_reported_as_a_proxy_failure():
 def check_engines_do_not_evaluate_a_string_in_the_browser():
     """§18: a site whose CSP omits `unsafe-eval` kills wait_for_function with
     an EvalError and takes the run down with exit 1, on the site's most
-    obvious URL. Mercor has not been measured for that, and the cheap habit
+    obvious URL. YouTube has not been measured for that, and the cheap habit
     costs nothing on a site that would have allowed it."""
     for module in ENGINES:
         path = os.path.join(HERE, module + ".py")
@@ -1638,8 +1637,8 @@ def check_credentials_never_reach_a_log():
     check("proxy_pool.mask keeps the exit", "exit.example.com:2334" in masked)
 
 def check_sample_output_matches_the_schema():
-    from output_writer import Comment as JobPosting
-    expected = [f.name for f in fields(JobPosting)]
+    from output_writer import Comment
+    expected = [f.name for f in fields(Comment)]
     json_path = os.path.join(HERE, "sample_output.json")
     csv_path = os.path.join(HERE, "sample_output.csv")
     if not os.path.exists(json_path):
@@ -1736,7 +1735,7 @@ def check_no_statement_is_unreachable():
 
 def main():
     global VERBOSE
-    parser = argparse.ArgumentParser(description="mercor-scraper offline suite")
+    parser = argparse.ArgumentParser(description="youtube-scraper offline suite")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     VERBOSE = args.verbose

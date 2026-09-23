@@ -11,7 +11,7 @@ public from the moment you press submit.
 
 If private reporting is unavailable to you, mail support@2captcha.com. That is
 2Captcha's general support address rather than a security-only one, so put
-**"mercor-scraper security"** in the subject — otherwise it lands in a queue
+**"youtube-scraper security"** in the subject — otherwise it lands in a queue
 about API keys and billing and takes longer to reach the right person.
 
 **What helps most:** the version you are on (commit hash), the exact command,
@@ -53,10 +53,11 @@ In scope:
 
 Not because these do not matter, but because they belong somewhere else:
 
-- **Bypassing Mercor's bot protection.** This scraper drives an ordinary
-  browser and passes challenges the way a browser does. Anything about how
-  Cloudflare behaves is not a vulnerability in this repository.
-- **The scraper stopped working.** Mercor changing its markup is expected —
+- **Bypassing YouTube's bot protection.** This scraper reads the endpoint
+  the site's own front end calls, and drives an ordinary browser only as a
+  fallback. Anything about how YouTube decides to refuse a client is not a
+  vulnerability in this repository.
+- **The scraper stopped working.** YouTube changing its payload is expected —
   file it as a normal issue, there is a template for exactly that.
 - **Anything about 2Captcha's services** — the solver API, the Scraping Browser
   API, proxies, fingerprints, billing, quotas. This repository is only a client
