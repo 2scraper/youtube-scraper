@@ -1055,7 +1055,7 @@ def _run_comments(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any
         # Said once, in the run's own log, rather than left to be inferred
         # from the absence of workers: page 5's address is inside page 4,
         # so this walk cannot be planned ahead or split (CLAUDE.md §7).
-        logger.info("This listing is not independently addressable — each "
+        logger.info("This comment thread is not independently addressable — each "
                     "page's token comes from the page before it, so the "
                     "walk is sequential.")
 
