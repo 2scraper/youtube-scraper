@@ -50,6 +50,9 @@ here changes a scraper's rows or exit codes.
   `.dockerignore` ignored `wellfound_jobs.*` instead of this repo's own
   default output, `youtube_comments.*`.
 
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+
 ## [0.2.0] — 2026-09-22
 
 Written after a third-party audit. Four of its findings were correctness
