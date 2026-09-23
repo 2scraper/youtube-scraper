@@ -9,6 +9,50 @@ mean every flag is frozen. Where a patch changes a default that costs money
 or changes what a column means, the entry leads with that in a blockquote
 rather than leaving it to be discovered from a bill or a chart.
 
+## [Unreleased]
+
+Leftovers from the repos this one was bootstrapped from, removed. Nothing
+here changes a scraper's rows or exit codes.
+
+### Fixed
+
+- **`diff_runs.py` printed another site's columns.** Added and removed rows
+  were summarised as `@ {company_name}  {compensation}` — "@ ?  pay not
+  stated" on every comment — and a `source_changed` line said "this is not
+  a change in the business". They now print the comment's author (or the
+  video's channel) and say the two payload shapes differ.
+- **`diff_runs.DETAIL_ONLY_FIELDS` named nine columns no row here has**
+  (salary, equity, company), so `source_changed` could never fire. It now
+  names the two tracked columns the entity and legacy comment shapes fill
+  differently: `author_is_verified` (the legacy shape has no badge) and
+  `reply_count` (exact on one shape, abbreviated on the other). Its
+  docstring examples, bucket descriptions and comments described another
+  site's restaurants and job listings and now describe comments.
+- **The engines' log line** "This listing is not independently
+  addressable" now says "This comment thread…".
+- **CONTRIBUTING.md and SECURITY.md described mercor.com** — its
+  `__NEXT_DATA__` sources, its Cloudflare beacon, its captcha, its pay
+  strings and its apply flow — and SECURITY.md asked for
+  "mercor-scraper security" in the subject. Both now describe this repo.
+- **The bug-report and site-change issue templates described etsy.com**
+  (DataDome, shop ratings, `etsy.com/search` placeholders). Rewritten for
+  YouTube from the README and TROUBLESHOOTING.md.
+- **`captcha_solver.py` described another site's headless refusal** (Akamai,
+  HTTP 403, measured 2026-09-10) as this site's, pointed at a "No DataDome
+  solver" section that does not exist, and counted "job links" and "lot
+  links". It now says what the README measured here.
+- **`smoke_test.py` carried Mercor run metadata** (`source="mercor.com"`,
+  390 records, `/explore`) in its sidecar check; it now uses the README's
+  own 3-page comments run (60 of 2,457,616 comments). Its argparse
+  description said "mercor-scraper offline suite", its row class was
+  imported as `JobPosting`, and several comments described Mercor routes.
+- **`requirements.txt` was headed `# mercor-scraper`**, and `.gitignore` /
+  `.dockerignore` ignored `wellfound_jobs.*` instead of this repo's own
+  default output, `youtube_comments.*`.
+
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+
 ## [0.2.0] — 2026-09-22
 
 Written after a third-party audit. Four of its findings were correctness

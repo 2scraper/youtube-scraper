@@ -197,8 +197,8 @@ def sample_check():
     sys.path.insert(0, str(REPO))
     from dataclasses import asdict
 
-    from output_writer import Comment as JobPosting
-    expected = list(asdict(JobPosting()).keys())
+    from output_writer import Comment
+    expected = list(asdict(Comment()).keys())
 
     for i, row in enumerate(rows):
         if list(row.keys()) != expected:

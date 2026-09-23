@@ -15,8 +15,8 @@
 # captures themselves stay out of the repo.
 !fixtures_generated.json
 !sample_output.csv
-wellfound_jobs.*
-wellfound_jobs_*.*
+youtube_comments.*
+youtube_comments_*.*
 
 # --- the live-test harness's working directory ---------------------------
 live_results/

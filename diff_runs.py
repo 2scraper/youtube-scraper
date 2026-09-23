@@ -5,32 +5,32 @@ diff_runs.py
 Compares two output files from this project (JSON, as written by
 output_writer.save) and reports what changed between them, keyed on `sku`.
 
-    python3 diff_runs.py --old restaurants.2026-09-01.json \\
-                          --new restaurants.2026-09-07.json
+    python3 diff_runs.py --old comments.2026-09-01.json \\
+                          --new comments.2026-09-07.json
 
 Typical use is a scheduled re-run kept under a dated filename, diffed against
 the previous one:
 
-    python3 playwright_scraper.py --text restaurants --location "New York, NY" \\
-        --out "restaurants_$(date +%F)"
-    python3 diff_runs.py --old "restaurants_$(ls -t restaurants_*.json | sed -n 2p)" \\
-                          --new "restaurants_$(date +%F).json" --out diff.json
+    python3 playwright_scraper.py --url dQw4w9WgXcQ --pages 5 \\
+        --out "comments_$(date +%F)"
+    python3 diff_runs.py --old "$(ls -t comments_*.json | grep -v meta | sed -n 2p)" \\
+                          --new "comments_$(date +%F).json" --out diff.json
 
 Four buckets, each keyed on sku:
 
   added          — sku present in --new, absent from --old
-  removed        — sku present in --old, absent from --new: the listing was
-                   filled or withdrawn, or simply fell outside the pages this
-                   run fetched
-  changed        — sku present in both, with a different title, rate range,
-                   pay period, commitment, work arrangement, location, or
-                   slot count. See TRACKED_FIELDS.
-  source_changed — sku present in both, but one row came from the INDEX
-                   (`explore`) and the other from a DETAIL page (`detail`),
-                   and they differ on a column only one of the two fills.
-                   Reported separately because this says something about our
-                   own two snapshots rather than about the listing — and
-                   --fail-on-change deliberately ignores it.
+  removed        — sku present in --old, absent from --new: the comment was
+                   deleted, or (far more often) fell outside the pages this
+                   run fetched — see below
+  changed        — sku present in both, with different text, engagement,
+                   badges or thread structure. See TRACKED_FIELDS.
+  source_changed — sku present in both, but the two rows were read out of
+                   different payload shapes (`innertube.entity` against
+                   `innertube.legacy`), and they differ on a column the two
+                   shapes fill differently. Reported separately because this
+                   says something about our own two snapshots rather than
+                   about the comment — and --fail-on-change deliberately
+                   ignores it.
 
 TWO THINGS TO KNOW BEFORE READING A DIFF OF THIS SITE
 -----------------------------------------------------
@@ -151,22 +151,19 @@ TRACKED_FIELDS = (
     "category",
 )
 
-# The subset that only ONE of the two sources populates.
-#
-# The split runs both ways on this site, which is why it is worth stating.
-# A landing row (`apollo`) has the equity range, the company's badges, size
-# and tagline, and no salary period. A job-page row (`jsonld`) has the
-# period, the benefits and the industry, and no equity at all — schema.org
-# has no expression for it. So diffing a landing run against a job run would
-# report each of these as a change on every row, and none of it would be
-# about the job. When the two rows disagree on `data_source`, they are
+# The tracked columns that the site's two comment payload shapes fill
+# DIFFERENTLY (product_parser: `_parse_entity_comments` against
+# `_parse_legacy_comments`). A legacy-shape row leaves `author_is_verified`
+# null, because that shape carries no verified badge, and states
+# `reply_count` as an exact integer where the entity shape states an
+# abbreviated string. So a comment read out of one shape last night and the
+# other tonight would report both as changes, and none of it would be about
+# the comment. When the two rows disagree on `data_source`, they are
 # reported as `source_changed` rather than as changes (§8: a difference that
 # comes with a provenance difference says something about our own two
 # snapshots, not about the site).
 DETAIL_ONLY_FIELDS = (
-    "benefits", "industry", "salary_period",
-    "equity_min", "equity_max", "has_equity",
-    "company_size", "company_tagline", "company_badges",
+    "author_is_verified", "reply_count",
 )
 # Kept as an alias so a caller written against the family's older name still
 # works; the two are the same tuple.
@@ -186,8 +183,8 @@ def _by_sku(products: List[dict]) -> Tuple[Dict[str, dict], int]:
         if sku is None:
             unmatchable += 1
             continue
-        # A run's own output can already hold a duplicate sku (two rows in the
-        # same category, or a rerun of dedupe_by_sku's job on older output
+        # A run's own output can already hold a duplicate sku (a comment a
+        # live `top` ranking served twice, or a rerun of dedupe_by_sku's job on older output
         # written before it existed) — keep the first and count the rest as
         # unmatchable rather than letting one clobber the other silently.
         if sku in indexed:
@@ -216,11 +213,11 @@ def diff_products(old: List[dict], new: List[dict]) -> dict:
             continue
 
         # A row whose `data_source` differs between runs is not comparable on
-        # the profile-only columns: a listing row leaves them null and a
-        # profile row fills them, so every one of them would read as a change
-        # and none of it would be about the business. Reporting it as a
-        # change would be a false alarm about the site; the other columns
-        # still compare fine.
+        # the columns the two payload shapes fill differently (see
+        # DETAIL_ONLY_FIELDS), so each of them would read as a change and
+        # none of it would be about the comment. Reporting it as a change
+        # would be a false alarm about the site; the other columns still
+        # compare fine.
         sources = (before.get("data_source"), after.get("data_source"))
         if sources[0] != sources[1] and any(f in field_changes
                                             for f in PROFILE_ONLY_FIELDS):
@@ -256,12 +253,10 @@ def _print_summary(result: dict) -> None:
           f"{len(result['source_changed'])} not comparable across run kinds.")
     for p in result["added"]:
         print(f"  + {p.get('sku')}  {p.get('title')}  "
-              f"@ {p.get('company_name') or '?'}  "
-              f"{p.get('compensation') or 'pay not stated'}")
+              f"by {p.get('author_name') or p.get('channel_name') or '?'}")
     for p in result["removed"]:
         print(f"  - {p.get('sku')}  {p.get('title')}  "
-              f"@ {p.get('company_name') or '?'}  "
-              f"{p.get('compensation') or 'pay not stated'}")
+              f"by {p.get('author_name') or p.get('channel_name') or '?'}")
     for c in result["changed"]:
         deltas = ", ".join(f"{f}: {v['old']!r} -> {v['new']!r}"
                            for f, v in c["changes"].items())
@@ -271,9 +266,9 @@ def _print_summary(result: dict) -> None:
         deltas = ", ".join(f"{f}: {v['old']!r} -> {v['new']!r}"
                            for f, v in c["changes"].items())
         print(f"  ? {c['sku']}  {c['title']}  {deltas}  "
-              f"[data_source {src['old']!r} -> {src['new']!r}: a listing row "
-              f"leaves these columns null and a profile row fills them, so "
-              f"this is not a change in the business]")
+              f"[data_source {src['old']!r} -> {src['new']!r}: the two "
+              f"payload shapes fill these columns differently, so this is "
+              f"not a change in the comment]")
     unmatchable = result["unmatchable_old"] + result["unmatchable_new"]
     if unmatchable:
         print(f"[!] {unmatchable} row(s) across both files had no sku or a "
@@ -324,7 +319,7 @@ def _check_comparable(args) -> bool:
             # one that does not is caught rather than discovered.
             problems.append(
                 f"{label} ({path}) is a {mode!r} run, which is not one row "
-                f"per sku. This tool diffs one row per sku on price, so there "
+                f"per sku. This tool diffs one row per sku, so there "
                 f"is nothing here it can compare.")
         if status != "complete":
             problems.append(
@@ -333,11 +328,11 @@ def _check_comparable(args) -> bool:
                 f"page(s), reason {meta.get('stop_reason')!r}")
     if len(set(modes.values())) > 1:
         kinds = set(modes.values())
-        # `careers` against either marketplace mode is the severe case and
+        # `comments` against either video mode is the severe case and
         # deserves its own sentence: the two share NO ids at all, so every
-        # row would be reported as both added and removed. `listings`
-        # against `job` is milder — same id space, different columns — but
-        # still describes the mode change rather than the catalogue.
+        # row would be reported as both added and removed. `video` against
+        # `search` is milder — same id space, different columns — but
+        # still describes the mode change rather than the site.
         if "comments" in kinds and kinds - {"comments"}:
             problems.append(
                 f"the two runs are different POPULATIONS ({modes}). A "
@@ -464,11 +459,11 @@ def main() -> int:
             json.dump(result, f, ensure_ascii=False, indent=2)
         print(f"[+] Full diff written to {args.out}")
 
-    # `source_changed` is not a reason to fail: it means one row came from a
-    # listing run and the other from a profile run, so the columns only a
-    # profile fills differ. That says something about our own two snapshots
-    # rather than about the business, and alerting on it would train whoever
-    # reads the alert to ignore it.
+    # `source_changed` is not a reason to fail: it means the two rows were
+    # read out of different payload shapes, which fill some columns
+    # differently. That says something about our own two snapshots rather
+    # than about the comment, and alerting on it would train whoever reads
+    # the alert to ignore it.
     if args.fail_on_change and (result["added"] or result["removed"] or result["changed"]):
         return 1
     return 0
