@@ -9,6 +9,28 @@ mean every flag is frozen. Where a patch changes a default that costs money
 or changes what a column means, the entry leads with that in a blockquote
 rather than leaving it to be discovered from a bill or a chart.
 
+## [Unreleased]
+
+### Fixed
+- **The Scraper API engine failed on every `--wait-text` / `--wait-element` /
+  `--wait-state` call, and was billed for it.** It sent `waitFor` as a
+  JSON-encoded string; measured 2026-09-23 the live API answers that with
+  HTTP 422 "params.waitFor must be an object" and still charges $0.0005,
+  while the same request with an object is answered 200. It is now sent as
+  an object. **And the target site's status was never seen:** the client
+  read the response's `status`, which is the API's own verdict string
+  ("success"), instead of `http_code`, the target's HTTP status — so a
+  target 403/503 reached the page classifier as "success". It now reads
+  `http_code` (falling back to `status` only if that is an int). A
+  regression check drives the real `fetch_html` with `requests.post`
+  stubbed.
+- **`--wait-state networkidle` is refused by the Scraper API since
+  2026-09-23** (HTTP 422 "params.waitFor.state must be one of: load,
+  domcontentloaded", still billed $0.0005 — measured with the fixed,
+  object-shaped `waitFor`). The choice is removed, and the module docstring
+  and README note that their 2026-09-21 `networkidle` row was taken with the
+  string form the API accepted then and cannot be reproduced today.
+
 ## [0.2.0] — 2026-09-22
 
 Written after a third-party audit. Four of its findings were correctness

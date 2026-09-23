@@ -317,6 +317,13 @@ service does not make. Measured 2026-09-21 against `/watch?v=dQw4w9WgXcQ`:
 | `waitFor {"element":"ytd-comment-thread-renderer"}` | **HTTP 408** — it never appears |
 | `waitFor {"text":"Top comments"}` | **HTTP 408** |
 
+Those were sent as a JSON-encoded string, which the API accepted that day.
+Measured 2026-09-23, the API answers the string form with HTTP 422 ("must be
+an object") and the `networkidle` state with HTTP 422 too — both still
+billed — so the client now sends an object and `--wait-state` offers only
+`load` and `domcontentloaded`. The second row cannot be reproduced today;
+the first row already makes the same point.
+
 A deliberately wrong key answered HTTP 401 in 0.1 s against the real key's
 200 in 6.7 s, so those 200s are real work rather than a cached refusal.
 What the client does do is `--mode video`, at $0.0005 per task, which is
