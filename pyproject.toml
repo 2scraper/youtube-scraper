@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "youtube-scraper"
-version = "0.2.0"
+version = "0.3.0"
 description = "YouTube comment scraper: comment threads and replies, video metadata, and video search, read from the site's own InnerTube endpoint."
 readme = "README.md"
 license = "MIT"
@@ -46,14 +46,17 @@ py-modules = [
     "diff_runs",
     "env_config",
     "fingerprint_client",
+    "http_transport",
     "output_writer",
     "page_flow",
     "playwright_scraper",
     "product_parser",
     "proxy_pool",
+    "run_core",
     "puppeteer_scraper",
     "scraper_api_client",
     "selenium_scraper",
+    "youtube_scraper",
 ]
 license-files = ["LICENSE"]
 

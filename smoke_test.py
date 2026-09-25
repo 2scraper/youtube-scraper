@@ -317,12 +317,83 @@ def check_fixtures_carry_no_personal_names():
     check("the video's own title is kept verbatim", VIDEO_TITLE in blob)
     check("the video's publisher is kept verbatim", "Rick Astley" in blob)
 
+def check_bot_challenge_is_not_read_as_content():
+    """The refusal YouTube actually sends, which v0.2.0 classified as
+    `content` and therefore never retried, never solved and never fell
+    back to a browser for.
+
+    Captured from `/player` for jNQXAC9IVRw on 2026-09-25 from a
+    datacentre address. Trimmed to the fields that classify; the
+    clickTrackingParams and the sign-in URL around them are session
+    material and are not kept (CLAUDE.md §10).
+
+    Two spellings and two encodings are asserted, because the bug was
+    both: the site writes U+2019 where the marker had ASCII, and
+    `json.dumps` then escaped it to `\u2019` in the text being searched.
+    """
+    import page_flow, product_parser
+    real = {
+        "playabilityStatus": {
+            "status": "LOGIN_REQUIRED",
+            "reason": "Sign in to confirm you\u2019re not a bot",
+            "errorScreen": {"playerErrorMessageRenderer": {
+                "reason": {"simpleText":
+                           "Sign in to confirm you\u2019re not a bot"},
+                "subreason": {"runs": [
+                    {"text": "This helps protect our community. "}]}}},
+        },
+        "responseContext": {}, "trackingParams": "",
+    }
+    equal("the real /player refusal is a challenge",
+          page_flow.classify(real, 200, "", "video", "player"), "challenge")
+    for label, reason in (
+            ("ASCII apostrophe", "Sign in to confirm you're not a bot"),
+            ("U+2019", "Sign in to confirm you\u2019re not a bot"),
+            ("U+02BC", "Sign in to confirm you\u02bcre not a bot")):
+        payload = {"playabilityStatus": {"status": "LOGIN_REQUIRED",
+                                         "reason": reason}}
+        equal("a bot challenge written with %s is a challenge" % label,
+              page_flow.classify(payload, 200, "", "video", "player"),
+              "challenge")
+    # The same status for a reason that is NOT about being a bot. This is
+    # what stops the fix from buying a solve on every age-gated video.
+    for reason in ("Sign in to confirm your age",
+                   "This video is private",
+                   "This video is available to this channel's members"):
+        payload = {"playabilityStatus": {"status": "LOGIN_REQUIRED",
+                                         "reason": reason}}
+        equal("a sign-in wall that is not a bot check: %s" % reason[:24],
+              page_flow.classify(payload, 200, "", "video", "player"),
+              "auth_required")
+    # And the case apply_player measured: UNPLAYABLE is NOT a refusal on
+    # this endpoint. The WEB client cannot get a playback stream without a
+    # proof-of-origin token, so a public, playing video answers UNPLAYABLE
+    # and serves its metadata anyway. Reading that as a refusal would
+    # report every video as refused.
+    playing = {"playabilityStatus": {"status": "UNPLAYABLE",
+                                     "reason": "Video unavailable"},
+               "videoDetails": {"title": "t", "lengthSeconds": "10"}}
+    equal("UNPLAYABLE with metadata stays content",
+          page_flow.classify(playing, 200, "", "video", "player"), "content")
+    check("playability_refusal ignores a payload with no status",
+          product_parser.playability_refusal({"videoDetails": {}}) is None)
+
+
 def check_state_policy():
     import page_flow
     equal("every state has a policy",
           sorted(page_flow.STATE_POLICY),
-          ["challenge", "comments_disabled", "content", "empty", "error",
-           "parse_error", "unknown", "video_unavailable"])
+          ["auth_required", "challenge", "comments_disabled", "content",
+           "empty", "error", "parse_error", "unknown", "video_unavailable"])
+    # auth_required was added on 2026-09-25 and is the narrow half of a
+    # real refusal: the site wants an ACCOUNT, not proof of humanity. It
+    # must never spend, because there is no widget on that page to solve,
+    # and must never rotate, because no exit is old enough. Pinned apart
+    # from `challenge` so the two cannot merge back by accident.
+    check("auth_required: never solves, never rotates, never blocked",
+          not page_flow.should_solve("auth_required")
+          and not page_flow.should_retry("auth_required")
+          and not page_flow.counts_as_blocked("auth_required"))
     check("content: parsed, not retried, not blocked",
           page_flow.should_parse("content")
           and not page_flow.should_retry("content")
@@ -373,7 +444,8 @@ def check_policy_constants_have_a_consumer():
     """
     import page_flow
     sources = []
-    for name in ("playwright_scraper.py", "selenium_scraper.py",
+    for name in ("run_core.py", "youtube_scraper.py",
+                 "playwright_scraper.py", "selenium_scraper.py",
                  "puppeteer_scraper.py", "scraper_api_client.py"):
         path = os.path.join(HERE, name)
         if os.path.exists(path):
@@ -381,7 +453,7 @@ def check_policy_constants_have_a_consumer():
     joined = "\n".join(sources)
     for constant in ("RETRY_ON_BLOCKED", "BLOCK_RETRIES_WITHOUT_POOL",
                      "SOLVES_PER_PAGE"):
-        check("page_flow.%s is CONSULTED by an engine" % constant,
+        check("page_flow.%s is CONSULTED by the run" % constant,
               constant in joined,
               "defined in page_flow and read by nothing")
     for fn in ("pages_to_plan", "ready_selector", "min_matches",
@@ -574,7 +646,8 @@ def check_shared_calls_bind_against_the_real_signature():
                "captcha_solver": captcha_solver, "env_config": env_config,
                "diff_runs": diff_runs}
     bound = 0
-    for module in ENGINES + ("scraper_api_client",):
+    for module in ENGINES + ("run_core", "youtube_scraper",
+                             "scraper_api_client"):
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
@@ -708,11 +781,20 @@ def check_engine_flag_sets():
 
     A missing flag fails; so does closing a difference the README documents.
     """
+    # The flags are declared once, in run_core.parse_args, and the three
+    # engines re-export it — so the contract is checked THERE, and the
+    # engines are checked for agreeing with it rather than for each
+    # holding their own copy. Before 2026-09-25 they held three copies and
+    # this check was the only thing keeping them equal.
+    core_flags = _argparse_flags("run_core")
+    missing_core = (CONTRACT_FLAGS | SITE_FLAGS) - core_flags
+    check("run_core declares every contract flag", not missing_core,
+          "missing %s" % sorted(missing_core))
     sets = {}
-    for module in ENGINES:
+    for module in list(ENGINES) + ["youtube_scraper"]:
         if not os.path.exists(os.path.join(HERE, module + ".py")):
             continue
-        sets[module] = _argparse_flags(module)
+        sets[module] = _argparse_flags(module) | core_flags
     for module, flags in sets.items():
         missing = (CONTRACT_FLAGS | SITE_FLAGS) - flags
         check("%s defines every contract flag" % module, not missing,
@@ -749,11 +831,16 @@ def check_the_concurrency_difference_is_documented_in_both_directions():
     a video run can. Both directions are pinned, so closing the difference
     is a decision rather than a surprise.
     """
+    # Engine + the shared run it delegates to. Before 2026-09-25 each
+    # engine carried its own copy of the worker loop and this check was
+    # what kept the three in step; now there is one copy, and the check
+    # is what proves each engine still reaches it.
+    core = open(os.path.join(HERE, "run_core.py"), encoding="utf-8").read()
     src = {}
     for module in ENGINES:
         path = os.path.join(HERE, module + ".py")
         if os.path.exists(path):
-            src[module] = open(path, encoding="utf-8").read()
+            src[module] = open(path, encoding="utf-8").read() + core
 
     for module, text in src.items():
         check("%s implements concurrency" % module,
@@ -804,7 +891,12 @@ def check_banned_and_removed_flags():
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
-        source = open(path, encoding="utf-8").read()
+        # The engine file plus the shared run it delegates to: the
+        # refusals live in run_core.parse_args since 2026-09-25, and a
+        # scan of the engine alone would report them missing.
+        source = (open(path, encoding="utf-8").read()
+                  + open(os.path.join(HERE, "run_core.py"),
+                         encoding="utf-8").read())
         for flag in BANNED_FLAGS:
             check("%s does not define %s" % (module, flag),
                   '"%s"' % flag not in source)
@@ -906,6 +998,39 @@ def check_dockerfile_copies_everything_the_entrypoint_imports():
     for unwanted in ("smoke_test", "test_smoke"):
         check("the image does not carry %s.py" % unwanted,
               unwanted not in copied)
+
+def check_pyproject_ships_every_module_the_entrypoints_import():
+    """The Dockerfile's COPY list has been guarded since §10; the WHEEL's
+    manifest was not, and it is the same class of list maintained by hand.
+
+    `http_transport.py` shipped in v0.2.0, reached Git and the Dockerfile,
+    and was never added to `py-modules` — so the built wheel imported
+    cleanly from a checkout (where the .py file is simply on the path) and
+    died with ModuleNotFoundError from anywhere else. A check that runs in
+    the source tree cannot see that, which is exactly why it needs to be a
+    manifest check rather than an import check.
+    """
+    path = os.path.join(HERE, "pyproject.toml")
+    if not os.path.exists(path):
+        check("pyproject.toml exists", False)
+        return
+    text = open(path, encoding="utf-8").read()
+    block = re.search(r"py-modules\s*=\s*\[(.*?)\]", text, re.S)
+    if not block:
+        check("pyproject.toml declares py-modules", False)
+        return
+    declared = set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', block.group(1)))
+    for entrypoint in ("playwright_scraper", "selenium_scraper",
+                       "puppeteer_scraper", "diff_runs"):
+        if not os.path.exists(os.path.join(HERE, entrypoint + ".py")):
+            continue
+        missing = sorted(_import_graph(entrypoint) - declared)
+        check("py-modules ships every module %s.py imports" % entrypoint,
+              not missing, "missing %s" % missing)
+    for unwanted in ("smoke_test", "test_smoke", "make_fixtures"):
+        check("py-modules does not ship %s" % unwanted,
+              unwanted not in declared)
+
 
 def check_env_example_documents_exactly_what_the_loader_reads():
     import env_config
@@ -1173,7 +1298,11 @@ def check_concurrency_with_the_browser_stubbed():
     results are restorable to the order they were asked for regardless of
     which worker finished first, and no worker is left running.
     """
-    engines = [(m, _import_engine(m)) for m in ENGINES]
+    # The worker loop is ONE implementation since 2026-09-25, so this
+    # drives it directly instead of once per engine — and it now runs in
+    # every environment, including one with no driver installed, which is
+    # where it used to skip.
+    engines = [("run_core", _import_engine("run_core"))]
     engines = [(m, e) for m, e in engines if e is not None]
     if not engines:
         skip("concurrency", "no engine library is importable here")
@@ -1221,18 +1350,25 @@ def check_concurrency_with_the_browser_stubbed():
             def close(self):
                 pass
 
+        # A fake DRIVER rather than a monkeypatched module-level context
+        # manager. This is what the extraction bought: the worker loop's
+        # whole decision tree is now exercisable with no driver installed
+        # at all (CLAUDE.md §26's second check).
+        class FakeDriver(engine.Driver):
+            name = "fake"
+
         originals = (engine._fetch_one_video, engine._open_session,
-                     engine._prime_session, engine._driver_context)
+                     engine._prime_session)
         try:
             engine._fetch_one_video = fake_fetch_one
-            engine._open_session = lambda pw, args, pool: FakeSession()
+            engine._open_session = (lambda pw, args, pool, transport=None:
+                                    FakeSession())
             engine._prime_session = lambda session, args, url: 200
-            engine._driver_context = _NullContext
             outcomes = engine._fetch_videos_concurrently(
-                None, Args(), None, ids, "2026-01-01T00:00:00Z", 4)
+                FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 4)
         finally:
             (engine._fetch_one_video, engine._open_session,
-             engine._prime_session, engine._driver_context) = originals
+             engine._prime_session) = originals
 
         equal("%s: every queued video was fetched" % _module, len(fetched), len(ids))
         equal("...exactly once each", len(set(n for n, _ in fetched)), len(ids))
@@ -1256,7 +1392,11 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
     queue items, so the run finishes "successfully" with a third of the
     videos silently missing and nothing in the log about it.
     """
-    engines = [(m, _import_engine(m)) for m in ENGINES]
+    # The worker loop is ONE implementation since 2026-09-25, so this
+    # drives it directly instead of once per engine — and it now runs in
+    # every environment, including one with no driver installed, which is
+    # where it used to skip.
+    engines = [("run_core", _import_engine("run_core"))]
     engines = [(m, e) for m, e in engines if e is not None]
     if not engines:
         skip("concurrency", "no engine library is importable here")
@@ -1302,18 +1442,21 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
             def close(self):
                 pass
 
+        class FakeDriver(engine.Driver):
+            name = "fake"
+
         originals = (engine._fetch_one_video, engine._open_session,
-                     engine._prime_session, engine._driver_context)
+                     engine._prime_session)
         try:
             engine._fetch_one_video = exploding_fetch
-            engine._open_session = lambda pw, args, pool: FakeSession()
+            engine._open_session = (lambda pw, args, pool, transport=None:
+                                    FakeSession())
             engine._prime_session = lambda session, args, url: 200
-            engine._driver_context = _NullContext
             outcomes = engine._fetch_videos_concurrently(
-                None, Args(), None, ids, "2026-01-01T00:00:00Z", 3)
+                FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 3)
         finally:
             (engine._fetch_one_video, engine._open_session,
-             engine._prime_session, engine._driver_context) = originals
+             engine._prime_session) = originals
 
         equal("%s: every video still produced an outcome" % _module, len(outcomes), len(ids))
         failed = [o for o in outcomes if not o.rows]
@@ -1329,7 +1472,7 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
                       if t is not threading.current_thread()))
 
 def check_worker_pools_start_on_different_exits():
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
         return
     from proxy_pool import ProxyPool
@@ -1399,6 +1542,15 @@ def check_every_engine_exposes_the_same_public_surface():
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target,
                                                                 ast.Name):
                 names.add(node.target.id)
+            elif isinstance(node, ast.ImportFrom):
+                # A re-exported name IS part of this module's surface, and
+                # since the run moved into run_core.py on 2026-09-25 it is
+                # how the engines carry most of theirs. Counting only
+                # `def`s here would have read "playwright_scraper no longer
+                # defines parse_args" as a regression rather than as the
+                # deduplication it was.
+                for alias in node.names:
+                    names.add(alias.asname or alias.name)
         surfaces[module] = names
 
     equal("all three engines are present to compare", len(surfaces), 3)
@@ -1406,7 +1558,8 @@ def check_every_engine_exposes_the_same_public_surface():
     # What each engine legitimately holds that its twins do not: the names
     # its own driver layer needs. Everything else must match.
     DRIVER_LOCAL = {
-        "playwright_scraper": {"sync_playwright", "PWError", "PWTimeout"},
+        "playwright_scraper": {"sync_playwright", "PWError", "PWTimeout",
+                               "to_playwright"},
         "puppeteer_scraper": {"launch", "connect", "asyncio", "concurrent",
                               "PyppeteerError", "NetworkError", "PPTimeout",
                               "_Loop", "_FETCH_JS", "RemoteBrowserError",
@@ -1434,7 +1587,7 @@ def check_every_engine_exposes_the_same_public_surface():
                      "_worker_pool", "_run_comments", "_run_video",
                      "_run_search", "_open_session", "_prime_session",
                      "_fetch_with_policy", "handle_captcha_if_present",
-                     "_proxy_failure", "_mask_credentials", "_driver_context",
+                     "_proxy_failure", "_mask_credentials",
                      "_rotate_if_per_page", "_run_replies",
                      "PLAYER_ONLY_FIELDS"):
             check("%s defines %s" % (module, name), name in names_in)
@@ -1474,7 +1627,12 @@ def check_every_solve_is_counted_against_the_budget():
     Inherited rather than measured here: this site has refused nothing, so
     no run of this repo has ever bought a solve.
     """
-    for module in ENGINES:
+    # The router, the browser handler and the budget all moved into
+    # run_core.py on 2026-09-25, so this is now ONE place rather than
+    # three — which is the whole reason the extraction was worth doing:
+    # §23 records a sibling where the same cap was enforced at one of two
+    # call sites and one page bought three solves.
+    for module in ("run_core",):
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
@@ -1503,7 +1661,7 @@ def check_every_solve_is_counted_against_the_budget():
     equal("a zero budget buys nothing", page_flow.SolveBudget(0).spend(), False)
 
     # And a solver call must sit behind it, not beside it.
-    for module in ENGINES:
+    for module in ("run_core",):
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
@@ -1541,7 +1699,11 @@ def check_a_dead_proxy_is_reported_as_a_proxy_failure():
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
-        source = open(path, encoding="utf-8").read()
+        # `_fetch_with_policy` moved into run_core.py on 2026-09-25 and
+        # the engines re-export it; the decision is still one place, it is
+        # just no longer three.
+        source = open(os.path.join(HERE, "run_core.py"),
+                      encoding="utf-8").read()
         # Anchored on the FUNCTION that carries the decision, not on the
         # first `except _TransportError` in the file — which is the
         # client-version fallback in `_prime_session` and comes earlier.
@@ -1570,7 +1732,7 @@ def check_a_dead_proxy_is_reported_as_a_proxy_failure():
               "a retry through the same dead exit is repetition, not a "
               "second attempt")
         check("%s rebuilds the browser when it rotates" % module,
-              "_open_session(pw, args, pool)" in branch,
+              "_open_session(" in branch and "pool," in branch,
               "a rotation is a fresh browser, never a proxy swapped under "
               "a live session")
         check("%s still has a plain message for a non-proxy failure" % module,
@@ -2582,7 +2744,8 @@ def _with_stubs(engine, fetch, body):
 
     original = (engine._open_session, engine._prime_session,
                 engine._fetch_with_policy)
-    engine._open_session = lambda pw, args, pool: FakeSession()
+    engine._open_session = (lambda pw, args, pool, transport=None:
+                                    FakeSession())
     engine._prime_session = lambda session, args, url: 200
     engine._fetch_with_policy = fetch
     try:
@@ -2607,9 +2770,9 @@ def check_a_lost_reply_thread_makes_the_run_partial():
     complete. Both halves are pinned here: the accounting, and the
     completeness rule underneath it.
     """
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
-        skip("playwright_scraper", "engine library absent")
+        skip("run_core", "unreachable: run_core needs no driver")
         return
 
     watch, page = FIX["watch"], FIX["comments_top_p1"]
@@ -2681,9 +2844,9 @@ def check_a_video_row_missing_its_player_fields_is_not_complete():
     SUCCESSFUL outcome: exit 0, `status: complete`, four empty columns and
     nothing to tell them from a video that genuinely has no category.
     """
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
-        skip("playwright_scraper", "engine library absent")
+        skip("run_core", "unreachable: run_core needs no driver")
         return
 
     watch, player = FIX["watch"], FIX["player"]
@@ -2705,14 +2868,273 @@ def check_a_video_row_missing_its_player_fields_is_not_complete():
     equal("the run names the gap", meta["stop_reason"], "player_incomplete")
     check("...and that is not a complete reason",
           "player_incomplete" not in output_writer.COMPLETE_STOP_REASONS)
-    check("the sidecar names the missing columns",
-          bool(meta.get("videos_incomplete"))
-          and "published_at" in meta["videos_incomplete"][0]["missing"])
+    entry = (meta.get("videos_incomplete") or [{}])[0]
+    check("the sidecar names the VIDEO, not a position",
+          entry.get("video_id") == rows[0].sku, repr(entry))
+    check("...and says why the source did not answer",
+          product_parser.STATE_ERROR in (entry.get("reason") or ""),
+          repr(entry.get("reason")))
     for field in engine.PLAYER_ONLY_FIELDS:
         equal("%s is null without /player" % field,
               getattr(rows[0], field), None)
     check("but the watch columns are untouched",
           rows[0].view_count is not None and bool(rows[0].title))
+
+
+def check_diff_runs_knows_which_columns_the_second_call_fills():
+    """Not from the audit — found by pulling on its F09 thread.
+
+    `diff_runs.PROFILE_ONLY_FIELDS` is the set of columns a row only has
+    when a second source answered, and the branch that uses it reports a
+    difference in them as `source_changed` rather than as a change: §8's
+    rule that a difference arriving WITH a provenance difference says
+    something about our own two snapshots, not about the site.
+
+    The tuple arrived from a donor repo naming a job board's columns —
+    `salary_period`, `equity_min`, `company_badges` — not one of which
+    exists here. The branch was therefore unreachable, and two columns it
+    should have covered (`duration_seconds`, `category`) are in
+    TRACKED_FIELDS, so two runs of the same video, one of which met a bot
+    challenge on `/player`, diffed as "the category changed" on every row.
+    """
+    import dataclasses, diff_runs
+    columns = {f.name for f in dataclasses.fields(output_writer.Comment)} \
+        | {f.name for f in dataclasses.fields(output_writer.Video)}
+    unknown = sorted(set(diff_runs.PROFILE_ONLY_FIELDS) - columns)
+    check("every second-call column actually exists on a row", not unknown,
+          "names no row has: %s" % unknown)
+    equal("and it is the /player set",
+          sorted(diff_runs.PROFILE_ONLY_FIELDS),
+          sorted(run_core_player_fields()))
+    # The whole point: a provenance difference must not read as news.
+    old = [{"sku": "v1", "data_source": "innertube.watch",
+            "category": None, "duration_seconds": None, "title": "t"}]
+    new = [{"sku": "v1", "data_source": "innertube.watch+player",
+            "category": "Music", "duration_seconds": 212, "title": "t"}]
+    report = diff_runs.diff_products(old, new)
+    equal("a /player column appearing is source_changed, not changed",
+          len(report.get("changed") or []), 0)
+    equal("...and it is reported as such",
+          len(report.get("source_changed") or []), 1)
+
+
+def run_core_player_fields():
+    import run_core
+    return run_core.PLAYER_ONLY_FIELDS
+
+
+def check_both_formats_are_published_back_to_back():
+    """F08, in the form this repo is willing to give.
+
+    `--format both` publishes two files. Each write is atomic on its own,
+    which says nothing about the pair: JSON used to be renamed into place,
+    then a line printed, then the whole CSV serialised, then IT renamed —
+    a kill in that gap left a new JSON beside a stale CSV.
+
+    The audit's remedy was a run directory with a manifest and a
+    published pointer. That is a stronger guarantee and a DIFFERENT output
+    contract; `<out>.json` / `<out>.csv` / `<out>.meta.json` is fixed
+    across this family and diff_runs.py is built on it. So the window is
+    narrowed inside the contract instead: both files complete and fsynced
+    first, then the two renames back-to-back.
+
+    Pinned because the tempting "simplification" is to fold this back
+    into two independent writes, which reads identical and is not.
+    """
+    source = open(os.path.join(HERE, "output_writer.py"),
+                  encoding="utf-8").read()
+    tree = ast.parse(source)
+    save = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "save"), None)
+    check("save() exists", save is not None)
+    if save is None:
+        return
+    body = ast.get_source_segment(source, save) or ""
+    check("both formats are staged before either is published",
+          ".json.staging" in body and ".csv.staging" in body,
+          "a partial write of one format can be published beside the other")
+    # The two renames must be adjacent: no print, no serialisation, no
+    # logging between them. Asserted structurally so a statement slipped
+    # in later fails rather than merely widening the gap.
+    lines = [i for i, line in enumerate(body.splitlines())
+             if "os.replace(staged_" in line]
+    equal("exactly two staged renames", len(lines), 2)
+    if len(lines) == 2:
+        equal("...and they are adjacent", lines[1] - lines[0], 1)
+    check("a failure removes both staging files",
+          "os.unlink(leftover)" in body,
+          "a crashed run must leave no half-written file behind")
+    check(".staging is ignored by git",
+          "*.staging" in open(os.path.join(HERE, ".gitignore"),
+                              encoding="utf-8").read(),
+          "an artefact nobody listed is one git add -A away (CLAUDE.md §24)")
+
+
+def check_the_sidecar_says_which_transport_ran():
+    """F07. Every HTTP sidecar said `engine: playwright` and nothing else.
+
+    The engine name is a true fact — it names the CLI that was invoked —
+    but it answers a question nobody asked. A reader could not tell an
+    HTTP run from a browser run, and could not see that `--transport auto`
+    had escalated to a browser partway through, which is exactly the event
+    that explains a change in timing, in cost and in what the site saw.
+
+    This check exists because the control for the fix stayed GREEN: the
+    fields were added and nothing asserted them, which satisfies a green
+    suite perfectly (CLAUDE.md §26).
+    """
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+    source = open(os.path.join(HERE, "run_core.py"), encoding="utf-8").read()
+    for field in ("transport_requested", "transports_used",
+                  "fallback_events"):
+        check("the sidecar carries %s" % field,
+              'extra["%s"]' % field in source,
+              "a run's transport is not recoverable from its artefacts")
+    # The escalation must be recorded where it happens, and must NOT be
+    # written onto the shared args object: one worker meeting a refusal
+    # would otherwise switch every worker's transport mid-run.
+    check("the auto fallback records itself on the worker's own box",
+          'session_box["transport"] = "browser"' in source
+          and 'session_box.setdefault("fallbacks"' in source)
+    # Asserted over the AST, not over the text: the docstring that
+    # explains why this assignment was removed contains the assignment,
+    # and a substring check read its own explanation as the defect
+    # (CLAUDE.md §22 — a note about a banned phrase is a use of it).
+    assigns_transport = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute) and target.attr == "transport"
+        and isinstance(target.value, ast.Name) and target.value.id == "args"]
+    check("...and no longer assigns args.transport",
+          not assigns_transport,
+          "args is one object shared by every worker (audit 2026-09-25); "
+          "found at line(s) %s" % [n.lineno for n in assigns_transport])
+    check("_open_session takes the transport explicitly",
+          "def _open_session(pw, args, pool: Optional[ProxyPool], "
+          "transport=None)" in source)
+    # And each session names its own transport, which is what the sidecar
+    # reads: a string computed in the writer could drift from reality.
+    import http_transport
+    equal("an HTTP session calls itself http",
+          http_transport.HttpSession.transport, "http")
+
+
+def check_a_worker_that_dies_at_startup_is_still_accounted_for():
+    """F04, and the worst of the 2026-09-25 audit's findings, because the
+    run reported success while holding nothing.
+
+    `pw.context()`, `_open_session` and `_prime_session` used to sit
+    OUTSIDE the try that turns an exception into a `PageOutcome`. A worker
+    that died on any of them printed a traceback to stderr, left its
+    queued videos in the queue, and `thread.join()` passed the failure to
+    nobody. The run then came back:
+
+        rows 0 · stop_reason "completed" · pages_failed [] · requested 2
+
+    and `finish_run`, reading a complete reason and no failures, called
+    zero rows an EMPTY CATALOGUE — exit 4 — for a run that never reached
+    the site. That is §25's defect arriving through a door §25 did not
+    close: the completeness rule was right, and the evidence handed to it
+    was empty.
+
+    The fix is a reconciliation rather than another reason in a list: the
+    set of ids asked for must equal the set accounted for. A set
+    comparison cannot miss a case nobody has taught it about.
+    """
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+
+    class FakeDriver(engine.Driver):
+        name = "fake"
+
+    ids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]
+
+    class Args:
+        mode = "video"
+        transport = "http"
+        cdp_endpoint = None
+        delay = 0
+        proxy_rotate = "per-run"
+
+    original = engine._open_session
+    try:
+        def explode(pw, args, pool, transport=None):
+            raise RuntimeError("startup failure")
+        engine._open_session = explode
+        outcomes = engine._fetch_videos_concurrently(
+            FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 2)
+    finally:
+        engine._open_session = original
+
+    equal("every requested video is accounted for", len(outcomes), len(ids))
+    equal("...by id, not by position",
+          sorted(o.video_id for o in outcomes), sorted(ids))
+    check("none of them claims rows", all(not o.rows for o in outcomes))
+    check("each names the startup failure",
+          all("startup failure" in (o.error or "") for o in outcomes),
+          repr([o.error for o in outcomes][:1]))
+    # And the consequence the sidecar carries: these count as failures, so
+    # the run cannot report itself complete.
+    check("they count as attempted failures",
+          all(o.attempted for o in outcomes))
+
+
+def check_an_empty_optional_column_is_not_a_failed_run():
+    """F05, the other direction, and the one that was actually wrong.
+
+    `keywords` is a list of tags the UPLOADER chose to set. A video with
+    none is ordinary. The old code asked one question — "is any of the
+    four /player columns empty?" — and answered three with it: it called
+    the source unanswered, wrote `data_source: innertube.watch` on a row
+    whose /player values had ALREADY been merged in, and made the whole
+    run partial.
+
+    So a perfectly good video with no tags reported exit 6, and a reader
+    comparing two runs saw the provenance change under them.
+    """
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+
+    watch = FIX["watch"]
+    # A /player answer that IS an answer: videoDetails and microformat
+    # present, and no keywords in it, exactly as the site sends for a
+    # video whose uploader set no tags.
+    player = {"playabilityStatus": {"status": "OK"},
+              "videoDetails": {"lengthSeconds": "212", "viewCount": "1"},
+              "microformat": {"playerMicroformatRenderer": {
+                  "publishDate": "2009-10-25", "category": "Music"}}}
+
+    def fetch(box, pw, args, pool, body, endpoint, label):
+        if endpoint == "player":
+            return 200, player, product_parser.STATE_CONTENT, False
+        return 200, watch, product_parser.STATE_CONTENT, False
+
+    def body(FakeSession):
+        args = _fault_args(engine, mode="video", pages=1)
+        box = {"session": FakeSession(), "prime_url": "u"}
+        return engine._run_video(box, None, args, pool=None)
+
+    rows, meta = _with_stubs(engine, fetch, body)
+    equal("the row is written", len(rows), 1)
+    equal("keywords really is empty", rows[0].keywords or [], [])
+    equal("the date came from /player", rows[0].published_at, "2009-10-25")
+    # The two assertions that failed before the fix.
+    equal("provenance names BOTH sources", rows[0].data_source,
+          "innertube.watch+player")
+    check("the run is NOT partial for an empty optional column",
+          meta["stop_reason"] != "player_incomplete"
+          and not meta.get("videos_incomplete"), repr(meta["stop_reason"]))
+    check("but the empty column is still recorded",
+          "keywords" in (meta.get("player_columns_empty") or []),
+          repr(meta.get("player_columns_empty")))
 
 
 def check_per_page_rotation_actually_rotates_per_page():
@@ -2727,9 +3149,9 @@ def check_per_page_rotation_actually_rotates_per_page():
     rotated once too often: it took a new exit after the LAST page too,
     tearing down a browser for a request that never came.
     """
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
-        skip("playwright_scraper", "engine library absent")
+        skip("run_core", "unreachable: run_core needs no driver")
         return
 
     watch, page = FIX["watch"], FIX["comments_top_p1"]

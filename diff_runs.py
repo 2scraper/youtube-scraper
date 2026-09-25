@@ -163,10 +163,25 @@ TRACKED_FIELDS = (
 # reported as `source_changed` rather than as changes (§8: a difference that
 # comes with a provenance difference says something about our own two
 # snapshots, not about the site).
+# The columns that exist only when the SECOND call answered. On this site
+# `data_source` is `innertube.watch` or `innertube.watch+player`, and these
+# four are exactly what the two differ by.
+#
+# This tuple arrived from a donor repo listing a job board's columns —
+# `salary_period`, `equity_min`, `company_badges` and six more, not one of
+# which exists on `Comment` or on `Video`. So the mechanism below was
+# live, correct and unreachable: nothing could ever match it, which is
+# CLAUDE.md §17's "a policy constant nothing reads" wearing the shape of a
+# working feature.
+#
+# It was not merely dead. `duration_seconds` and `category` ARE in
+# TRACKED_FIELDS, so two runs of the same video — one that reached
+# `/player` and one that met a bot challenge on it — diffed as "the
+# category changed" and "the duration changed" on every row. That is a
+# claim about YouTube made from a fact about our own two snapshots, which
+# is the exact false alarm §8 wrote this branch to prevent.
 DETAIL_ONLY_FIELDS = (
-    "benefits", "industry", "salary_period",
-    "equity_min", "equity_max", "has_equity",
-    "company_size", "company_tagline", "company_badges",
+    "published_at", "duration_seconds", "category", "keywords",
 )
 # Kept as an alias so a caller written against the family's older name still
 # works; the two are the same tuple.

@@ -30,6 +30,68 @@ permissions:
   contents: read
 
 jobs:
+  # The README's central claim, under test every morning: this site needs
+  # no key, no proxy, no account AND NO BROWSER LIBRARY. Nothing here
+  # installs an engine, so if YouTube ever stops answering a plain HTTPS
+  # client this job goes red the next day and the claim is retested
+  # without anyone remembering to.
+  #
+  # It exists because v0.2.0's quick start was broken in exactly this way
+  # and every other job installed Playwright, so nothing could see it: a
+  # reader following the README met ModuleNotFoundError on their first
+  # command while the badges were green (CLAUDE.md §21, §23).
+  core-only:
+    name: the quick start, with only requirements.txt installed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install the core and NOTHING else
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: No engine library may be importable here
+        run: |
+          for lib in playwright selenium pyppeteer; do
+            if python -c "import $lib" 2>/dev/null; then
+              echo "::error::$lib is installed; this job tests the case where none is"
+              exit 1
+            fi
+          done
+          echo "confirmed: no browser engine is importable"
+
+      - name: The README's own first command
+        run: |
+          set +e
+          python youtube_scraper.py --url dQw4w9WgXcQ --pages 3 \
+            --format json --out core_only
+          code=$?
+          set -e
+          echo "youtube_scraper.py exit $code"
+          test "$code" = "0"
+          python - <<'PY'
+          import json
+          rows = json.load(open("core_only.json"))
+          meta = json.load(open("core_only.meta.json"))
+          assert len(rows) >= 40, "only %d rows" % len(rows)
+          assert meta["status"] == "complete", meta["status"]
+          assert meta["transports_used"] == ["http"], meta["transports_used"]
+          assert len({r["sku"] for r in rows}) == len(rows), "duplicate sku"
+          print("core-only OK: %d rows, %s, transport %s"
+                % (len(rows), meta["status"], meta["transports_used"]))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: canary-core-only
+          path: core_only.*
+
   comments:
     name: a real three-page comment scrape, with no credentials at all
     runs-on: ubuntu-latest

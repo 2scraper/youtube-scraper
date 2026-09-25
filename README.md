@@ -15,13 +15,23 @@ read from the endpoint YouTube's own front end calls.
 git clone https://github.com/2scraper/youtube-scraper.git
 cd youtube-scraper
 python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
-./.venv/bin/python playwright_scraper.py --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --pages 3
+./.venv/bin/python youtube_scraper.py --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --pages 3
 ```
 
 **No browser is installed above, and none is started.** The endpoint this
 reads answers plain HTTPS, so `--transport auto` — the default — never
-opens one unless the site refuses. Install an engine when you want the
-fallback to have something to fall back to:
+opens one unless the site refuses.
+
+Those four lines are now tested as written. Until v0.3.0 the fourth one
+named `playwright_scraper.py`, which imports Playwright at module level,
+so the quick start died with `ModuleNotFoundError` on a clean install —
+a paragraph promising no browser was needed sat directly beneath a
+command that needed one. `youtube_scraper.py` is the CLI that carries
+that promise; the three engine scripts are still there and still take
+the same flags, but each one needs its own library.
+
+Install an engine when you want the fallback to have something to fall
+back to, or when you want to drive a browser deliberately:
 
 ```bash
 ./.venv/bin/pip install -r requirements-playwright.txt
@@ -131,13 +141,13 @@ than none.
 
 ```bash
 # comments (default) — a video's threads, newest first, with replies
-python3 playwright_scraper.py --url dQw4w9WgXcQ --pages 5 --sort newest --replies
+python3 youtube_scraper.py --url dQw4w9WgXcQ --pages 5 --sort newest --replies
 
 # video — one video's metadata, including the exact upload date
-python3 playwright_scraper.py --url dQw4w9WgXcQ --mode video
+python3 youtube_scraper.py --url dQw4w9WgXcQ --mode video
 
 # search — a query to videos, to feed --mode comments
-python3 playwright_scraper.py --url "web scraping tutorial" --mode search --pages 3
+python3 youtube_scraper.py --url "web scraping tutorial" --mode search --pages 3
 ```
 
 **A page is a continuation, not a screen.** In `--mode comments` one page
@@ -256,14 +266,19 @@ answer you want.
 
 | | comments | video | search | notes |
 |---|---|---|---|---|
-| `playwright_scraper.py` | yes | yes | yes | primary |
+| `youtube_scraper.py` | yes | yes | yes | **no browser library required** |
+| `playwright_scraper.py` | yes | yes | yes | primary browser engine |
 | `puppeteer_scraper.py` | yes | yes | yes | pyppeteer is effectively unmaintained |
 | `selenium_scraper.py` | yes | yes | yes | cannot use `--cdp-endpoint`, see below |
 | `scraper_api_client.py` | **no** | yes | no | measured, see below |
 
-The three browser engines are one file with three driver layers; everything
-above the transport is the same text, so they cannot drift on exit codes or
-run status. Verified live on 2026-09-21: the same video and ordering
+The three browser engines are one file with three driver layers, and since
+v0.3.0 that is literal rather than aspirational: the run lives in
+`run_core.py` and each engine supplies four operations (`name`,
+`context`, `launch_local`, `connect_remote`). Before the split, 24 of the
+29 definitions they shared were byte-identical — 1,078 lines each, 2,156
+duplicated — and `scrape()` differed by one line, the engine's own name.
+They cannot drift on exit codes or run status because there is one copy. Verified live on 2026-09-21: the same video and ordering
 through all three gave **40 rows each, 40 ids in common, and zero
 disagreeing columns**.
 

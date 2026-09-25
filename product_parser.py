@@ -730,6 +730,12 @@ STATE_EMPTY = "empty"
 STATE_CHALLENGE = "challenge"
 STATE_ERROR = "error"
 STATE_UNKNOWN = "unknown"
+# The site demands a signed-in account for a reason that is NOT a bot
+# challenge: an age-restricted, private or members-only video. A real
+# answer ABOUT THE VIDEO rather than about us, so it must never buy a
+# solve (CLAUDE.md §8: detected != blocking != paying) and must never
+# rotate an exit, which cannot change how old the viewer is.
+STATE_AUTH_REQUIRED = "auth_required"
 
 # Markers for a refusal. Short, and deliberately so.
 #
@@ -755,11 +761,34 @@ STATE_UNKNOWN = "unknown"
 # here — 60 consecutive pages from this address drew no refusal at all — so
 # they are carried as documented-but-unverified and are marked as such
 # rather than described as measured (CLAUDE.md §19).
+# Every marker here is written with an ASCII apostrophe and matched
+# against text that `_fold_apostrophes` has normalised, because YOUTUBE
+# DOES NOT USE ONE. Captured from `/player` for jNQXAC9IVRw on
+# 2026-09-25 from a datacentre address:
+#
+#     "reason": "Sign in to confirm you\u2019re not a bot"
+#
+# U+2019, and `json.dumps` with its default `ensure_ascii=True` then
+# turned it into the six characters `\u2019` in the text being searched
+# — so the shipped ASCII marker missed the real refusal twice over, and
+# the response fell through to `content`. This is CLAUDE.md §20's "a
+# marker must survive BOTH encodings of the same page", arriving through
+# a typographic apostrophe instead of an HTML entity.
 BOT_CHALLENGE_MARKERS = (
-    "Sign in to confirm you're not a bot",   # unverified from this address
+    "Sign in to confirm you're not a bot",        # measured 2026-09-25
     "Sign in to confirm that you're not a bot",
-    "/sorry/index",                          # Google's own refusal path
+    "/sorry/index",                               # Google's own refusal path
 )
+
+# The apostrophes a site may use where ASCII writes '. Folding is cheaper
+# and safer than carrying every spelling of every marker: a marker added
+# later inherits the tolerance instead of inheriting the hole.
+_APOSTROPHES = "\u2019\u02bc\u2018\u00b4\u02b9"
+
+def _fold_apostrophes(text: str) -> str:
+    for ch in _APOSTROPHES:
+        text = text.replace(ch, "'")
+    return text
 BLOCKED_STATUSES = (401, 403, 429)
 # The site's structural "this video is not here", measured 0 on ten served
 # captures and 2 on the unavailable one.
@@ -778,12 +807,51 @@ def detect_bot_challenge(text: Optional[str], status: Optional[int] = None
         return f"http {status}"
     if not text:
         return None
-    body = text if isinstance(text, str) else json.dumps(text)
-    head = body[:200_000]
+    # ensure_ascii=False on purpose: the default turns every non-ASCII
+    # character into a `\uXXXX` escape, so a marker written with a real
+    # character could never match a serialised payload. Folded afterwards
+    # so one ASCII spelling covers every apostrophe the site may use.
+    body = text if isinstance(text, str) else json.dumps(text,
+                                                         ensure_ascii=False)
+    head = _fold_apostrophes(body[:200_000])
     for marker in BOT_CHALLENGE_MARKERS:
         if marker in head:
             return marker
     return None
+
+
+def playability_refusal(payload: Any) -> Optional[str]:
+    """The site's OWN field for "you may not have this", or None.
+
+    Structural, so it survives a reworded sentence and any locale — which
+    a text marker does not, and the text marker above had already been
+    missing the real one. CLAUDE.md §17: order the signals by how much
+    they prove.
+
+    Deliberately narrow, and `UNPLAYABLE` is deliberately absent. See
+    `apply_player`: this endpoint answers `UNPLAYABLE / "Video
+    unavailable"` for videos that are public and playing, because the WEB
+    client cannot get a playback stream without a proof-of-origin token
+    — and it serves the metadata anyway. Treating that as a refusal would
+    report every video as refused, which is a worse bug than the one this
+    function fixes.
+    """
+    if not isinstance(payload, dict):
+        return None
+    status_field = (payload.get("playabilityStatus") or {})
+    if not isinstance(status_field, dict):
+        return None
+    if status_field.get("status") != "LOGIN_REQUIRED":
+        return None
+    reason = status_field.get("reason")
+    if not isinstance(reason, str):
+        reason = ""
+    folded = _fold_apostrophes(reason)
+    if "not a bot" in folded:
+        return STATE_CHALLENGE
+    # A sign-in wall that is not a bot challenge: age-restricted, private
+    # or members-only. Named apart so it can never buy a solve.
+    return STATE_AUTH_REQUIRED
 
 
 def detect_page_state(payload: Any, status: Optional[int] = None,
@@ -806,7 +874,12 @@ def detect_page_state(payload: Any, status: Optional[int] = None,
     if not isinstance(payload, dict):
         return STATE_UNKNOWN
 
-    serialized = json.dumps(payload)[:200_000]
+    # The site's own field before any wording of ours.
+    refusal = playability_refusal(payload)
+    if refusal:
+        return refusal
+
+    serialized = json.dumps(payload, ensure_ascii=False)[:200_000]
     if detect_bot_challenge(serialized):
         return STATE_CHALLENGE
 

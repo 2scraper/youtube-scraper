@@ -31,6 +31,109 @@ rather than leaving it to be discovered from a bill or a chart.
   and README note that their 2026-09-21 `networkidle` row was taken with the
   string form the API accepted then and cannot be reproduced today.
 
+## [0.3.0] — 2026-09-25
+
+Written after a second third-party audit. Seven of its nine findings were
+reproduced before anything was changed, and every fix was controlled by
+breaking it and requiring the named check to go red.
+
+> **The quick start in v0.2.0's README did not run.** `pip install -r
+> requirements.txt` followed by `python playwright_scraper.py …` — the
+> two commands this repo prints first — ended in
+> `ModuleNotFoundError: No module named 'playwright'`, three lines above
+> a paragraph promising that no browser was needed. The browser-free CLI
+> is now `youtube_scraper.py`; the engine scripts still take the same
+> flags and still need their own library. If you scripted against
+> `playwright_scraper.py` and have Playwright installed, nothing changes.
+
+> **A bot challenge was being recorded as content.** A run that met
+> YouTube's "Sign in to confirm you're not a bot" on `/player` reported
+> `state: content`, wrote a row with four null columns, blamed a missing
+> category, and — because `--transport auto` escalates only on a blocked
+> state — never fell back to a browser. If you have runs whose video rows
+> carry null `published_at`/`duration_seconds`/`category`/`keywords`,
+> some of those were refusals, not videos without a category.
+
+> **`status` and exit codes move again.** A run whose workers all died
+> at startup used to report `complete` and exit 4 ("no products"); it now
+> reports the failure and cannot be complete. A video with no uploader
+> tags used to report `partial` and exit 6; it is now `complete`, exit 0.
+
+### Fixed
+
+- **A real bot challenge classified as `content`** (F03). Captured live
+  from `/player` on 2026-09-25: the site answers
+  `playabilityStatus.status = LOGIN_REQUIRED` with the reason "Sign in to
+  confirm you’re not a bot" — a U+2019 apostrophe where the shipped
+  marker had ASCII — and the classifier searched a `json.dumps` of the
+  payload whose default `ensure_ascii=True` turned that character into
+  the six characters of an escape. The marker therefore missed in two
+  independent ways. Classification now leads with the site's own field,
+  and the text layer is folded and serialised so a marker added later
+  inherits the tolerance rather than the hole. `UNPLAYABLE` deliberately
+  still means nothing: the WEB client cannot obtain a playback stream
+  without a proof-of-origin token, so public, playing videos answer with
+  it and serve their metadata anyway.
+- **A new `auth_required` state**, so an age-restricted, private or
+  members-only video can never buy a captcha solve. There is no widget on
+  that page for any solver at any price, and no exit is old enough.
+- **`http_transport.py` was missing from the wheel** (F02). It shipped in
+  v0.2.0, reached Git and the Docker image, and was absent from
+  `py-modules`: the wheel imported fine from a checkout and died with
+  `ModuleNotFoundError` from anywhere else. A guard now checks the
+  manifest against the entrypoints' real import graph, the way the
+  Dockerfile's COPY list has been checked since v0.1.0.
+- **Worker startup failures vanished from the accounting** (F04). A
+  worker that died before its first fetch left its queued videos
+  untouched and reported nothing, so a run that never reached the site
+  came back `stop_reason: completed`, `pages_failed: []`, and zero rows —
+  which `finish_run` then read as an empty catalogue. The run now
+  reconciles the set of ids asked for against the set accounted for.
+- **An empty optional column reported a failed run** (F05). `keywords` is
+  a list of tags the uploader chose to set; a video with none is
+  ordinary. Whether `/player` answered is now decided structurally, and
+  columns the site left empty are recorded as information
+  (`player_columns_empty`) rather than as a fault.
+- **Batch video runs recorded an address that identifies nothing** (F06).
+  `--mode video` takes a comma-separated list and the whole list was
+  handed to a single-id parser, so `start_url` and `final_url` were both
+  `https://www.youtube.com/watch?v=`. Ids are normalised once up front,
+  and every per-video sidecar entry now names the video rather than a
+  position.
+- **No run said which transport it used** (F07). `transport_requested`,
+  `transports_used` and `fallback_events` are recorded beside the engine
+  name. Fixing it removed a shared-state bug the audit raised separately:
+  the `auto` fallback escalated by assigning `args.transport`, and `args`
+  is one object shared by every worker.
+- **`--format both` published its two files with a gap between them**
+  (F08). Both are now written and fsynced before either is renamed, and
+  the two renames run back-to-back. The window is narrower, not zero —
+  closing it entirely would mean a run directory and a manifest, which is
+  a different output contract from the one `diff_runs.py` is built on.
+
+### Changed
+
+- **The run is one implementation** (`run_core.py`). Measured before the
+  split: of the 29 definitions the three engines shared, 24 were
+  byte-identical — 1,078 lines each, 2,156 duplicated — and `scrape()`
+  differed by one line. The engines are now 410/362/556 lines instead of
+  ~1,600 each, and supply four operations. This is what made the seven
+  fixes above four edits instead of twelve.
+- **A browser library is imported only when a browser is opened.** The
+  Playwright runtime used to start on every run including
+  `--transport http`. The engines still import their driver at module
+  level, which the offline suite's skip and CI's import check depend on.
+- Offline suite: 817 checks. Groups that used to skip without an engine
+  installed now run, because the shared loop is exercised with a fake
+  driver rather than a monkeypatched context manager.
+
+### Measured
+
+- From a datacentre address on 2026-09-25, `/player` answered
+  `LOGIN_REQUIRED` for 3 of 4 sampled videos with 6 s between requests —
+  per video, not throttling. Before this release every one of those was
+  read as `content`.
+
 ## [0.2.0] — 2026-09-22
 
 Written after a third-party audit. Four of its findings were correctness
