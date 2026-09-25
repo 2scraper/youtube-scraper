@@ -317,12 +317,83 @@ def check_fixtures_carry_no_personal_names():
     check("the video's own title is kept verbatim", VIDEO_TITLE in blob)
     check("the video's publisher is kept verbatim", "Rick Astley" in blob)
 
+def check_bot_challenge_is_not_read_as_content():
+    """The refusal YouTube actually sends, which v0.2.0 classified as
+    `content` and therefore never retried, never solved and never fell
+    back to a browser for.
+
+    Captured from `/player` for jNQXAC9IVRw on 2026-09-25 from a
+    datacentre address. Trimmed to the fields that classify; the
+    clickTrackingParams and the sign-in URL around them are session
+    material and are not kept (CLAUDE.md §10).
+
+    Two spellings and two encodings are asserted, because the bug was
+    both: the site writes U+2019 where the marker had ASCII, and
+    `json.dumps` then escaped it to `\u2019` in the text being searched.
+    """
+    import page_flow, product_parser
+    real = {
+        "playabilityStatus": {
+            "status": "LOGIN_REQUIRED",
+            "reason": "Sign in to confirm you\u2019re not a bot",
+            "errorScreen": {"playerErrorMessageRenderer": {
+                "reason": {"simpleText":
+                           "Sign in to confirm you\u2019re not a bot"},
+                "subreason": {"runs": [
+                    {"text": "This helps protect our community. "}]}}},
+        },
+        "responseContext": {}, "trackingParams": "",
+    }
+    equal("the real /player refusal is a challenge",
+          page_flow.classify(real, 200, "", "video", "player"), "challenge")
+    for label, reason in (
+            ("ASCII apostrophe", "Sign in to confirm you're not a bot"),
+            ("U+2019", "Sign in to confirm you\u2019re not a bot"),
+            ("U+02BC", "Sign in to confirm you\u02bcre not a bot")):
+        payload = {"playabilityStatus": {"status": "LOGIN_REQUIRED",
+                                         "reason": reason}}
+        equal("a bot challenge written with %s is a challenge" % label,
+              page_flow.classify(payload, 200, "", "video", "player"),
+              "challenge")
+    # The same status for a reason that is NOT about being a bot. This is
+    # what stops the fix from buying a solve on every age-gated video.
+    for reason in ("Sign in to confirm your age",
+                   "This video is private",
+                   "This video is available to this channel's members"):
+        payload = {"playabilityStatus": {"status": "LOGIN_REQUIRED",
+                                         "reason": reason}}
+        equal("a sign-in wall that is not a bot check: %s" % reason[:24],
+              page_flow.classify(payload, 200, "", "video", "player"),
+              "auth_required")
+    # And the case apply_player measured: UNPLAYABLE is NOT a refusal on
+    # this endpoint. The WEB client cannot get a playback stream without a
+    # proof-of-origin token, so a public, playing video answers UNPLAYABLE
+    # and serves its metadata anyway. Reading that as a refusal would
+    # report every video as refused.
+    playing = {"playabilityStatus": {"status": "UNPLAYABLE",
+                                     "reason": "Video unavailable"},
+               "videoDetails": {"title": "t", "lengthSeconds": "10"}}
+    equal("UNPLAYABLE with metadata stays content",
+          page_flow.classify(playing, 200, "", "video", "player"), "content")
+    check("playability_refusal ignores a payload with no status",
+          product_parser.playability_refusal({"videoDetails": {}}) is None)
+
+
 def check_state_policy():
     import page_flow
     equal("every state has a policy",
           sorted(page_flow.STATE_POLICY),
-          ["challenge", "comments_disabled", "content", "empty", "error",
-           "parse_error", "unknown", "video_unavailable"])
+          ["auth_required", "challenge", "comments_disabled", "content",
+           "empty", "error", "parse_error", "unknown", "video_unavailable"])
+    # auth_required was added on 2026-09-25 and is the narrow half of a
+    # real refusal: the site wants an ACCOUNT, not proof of humanity. It
+    # must never spend, because there is no widget on that page to solve,
+    # and must never rotate, because no exit is old enough. Pinned apart
+    # from `challenge` so the two cannot merge back by accident.
+    check("auth_required: never solves, never rotates, never blocked",
+          not page_flow.should_solve("auth_required")
+          and not page_flow.should_retry("auth_required")
+          and not page_flow.counts_as_blocked("auth_required"))
     check("content: parsed, not retried, not blocked",
           page_flow.should_parse("content")
           and not page_flow.should_retry("content")
@@ -906,6 +977,39 @@ def check_dockerfile_copies_everything_the_entrypoint_imports():
     for unwanted in ("smoke_test", "test_smoke"):
         check("the image does not carry %s.py" % unwanted,
               unwanted not in copied)
+
+def check_pyproject_ships_every_module_the_entrypoints_import():
+    """The Dockerfile's COPY list has been guarded since §10; the WHEEL's
+    manifest was not, and it is the same class of list maintained by hand.
+
+    `http_transport.py` shipped in v0.2.0, reached Git and the Dockerfile,
+    and was never added to `py-modules` — so the built wheel imported
+    cleanly from a checkout (where the .py file is simply on the path) and
+    died with ModuleNotFoundError from anywhere else. A check that runs in
+    the source tree cannot see that, which is exactly why it needs to be a
+    manifest check rather than an import check.
+    """
+    path = os.path.join(HERE, "pyproject.toml")
+    if not os.path.exists(path):
+        check("pyproject.toml exists", False)
+        return
+    text = open(path, encoding="utf-8").read()
+    block = re.search(r"py-modules\s*=\s*\[(.*?)\]", text, re.S)
+    if not block:
+        check("pyproject.toml declares py-modules", False)
+        return
+    declared = set(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', block.group(1)))
+    for entrypoint in ("playwright_scraper", "selenium_scraper",
+                       "puppeteer_scraper", "diff_runs"):
+        if not os.path.exists(os.path.join(HERE, entrypoint + ".py")):
+            continue
+        missing = sorted(_import_graph(entrypoint) - declared)
+        check("py-modules ships every module %s.py imports" % entrypoint,
+              not missing, "missing %s" % missing)
+    for unwanted in ("smoke_test", "test_smoke", "make_fixtures"):
+        check("py-modules does not ship %s" % unwanted,
+              unwanted not in declared)
+
 
 def check_env_example_documents_exactly_what_the_loader_reads():
     import env_config
