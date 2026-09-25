@@ -2881,6 +2881,53 @@ def check_a_video_row_missing_its_player_fields_is_not_complete():
           rows[0].view_count is not None and bool(rows[0].title))
 
 
+def check_both_formats_are_published_back_to_back():
+    """F08, in the form this repo is willing to give.
+
+    `--format both` publishes two files. Each write is atomic on its own,
+    which says nothing about the pair: JSON used to be renamed into place,
+    then a line printed, then the whole CSV serialised, then IT renamed —
+    a kill in that gap left a new JSON beside a stale CSV.
+
+    The audit's remedy was a run directory with a manifest and a
+    published pointer. That is a stronger guarantee and a DIFFERENT output
+    contract; `<out>.json` / `<out>.csv` / `<out>.meta.json` is fixed
+    across this family and diff_runs.py is built on it. So the window is
+    narrowed inside the contract instead: both files complete and fsynced
+    first, then the two renames back-to-back.
+
+    Pinned because the tempting "simplification" is to fold this back
+    into two independent writes, which reads identical and is not.
+    """
+    source = open(os.path.join(HERE, "output_writer.py"),
+                  encoding="utf-8").read()
+    tree = ast.parse(source)
+    save = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "save"), None)
+    check("save() exists", save is not None)
+    if save is None:
+        return
+    body = ast.get_source_segment(source, save) or ""
+    check("both formats are staged before either is published",
+          ".json.staging" in body and ".csv.staging" in body,
+          "a partial write of one format can be published beside the other")
+    # The two renames must be adjacent: no print, no serialisation, no
+    # logging between them. Asserted structurally so a statement slipped
+    # in later fails rather than merely widening the gap.
+    lines = [i for i, line in enumerate(body.splitlines())
+             if "os.replace(staged_" in line]
+    equal("exactly two staged renames", len(lines), 2)
+    if len(lines) == 2:
+        equal("...and they are adjacent", lines[1] - lines[0], 1)
+    check("a failure removes both staging files",
+          "os.unlink(leftover)" in body,
+          "a crashed run must leave no half-written file behind")
+    check(".staging is ignored by git",
+          "*.staging" in open(os.path.join(HERE, ".gitignore"),
+                              encoding="utf-8").read(),
+          "an artefact nobody listed is one git add -A away (CLAUDE.md §24)")
+
+
 def check_the_sidecar_says_which_transport_ran():
     """F07. Every HTTP sidecar said `engine: playwright` and nothing else.
 
