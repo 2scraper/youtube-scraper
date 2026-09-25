@@ -26,7 +26,8 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-playwright.tx
 # with ModuleNotFoundError on every invocation INCLUDING `--help` — a broken
 # container that nothing in the repo would have noticed.
 COPY captcha_solver.py env_config.py fingerprint_client.py output_writer.py \
-     http_transport.py page_flow.py playwright_scraper.py product_parser.py \
+     http_transport.py page_flow.py run_core.py youtube_scraper.py \
+     playwright_scraper.py product_parser.py \
      proxy_pool.py diff_runs.py ./
 
 ENTRYPOINT ["python3", "playwright_scraper.py"]

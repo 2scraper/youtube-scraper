@@ -444,7 +444,8 @@ def check_policy_constants_have_a_consumer():
     """
     import page_flow
     sources = []
-    for name in ("playwright_scraper.py", "selenium_scraper.py",
+    for name in ("run_core.py", "youtube_scraper.py",
+                 "playwright_scraper.py", "selenium_scraper.py",
                  "puppeteer_scraper.py", "scraper_api_client.py"):
         path = os.path.join(HERE, name)
         if os.path.exists(path):
@@ -452,7 +453,7 @@ def check_policy_constants_have_a_consumer():
     joined = "\n".join(sources)
     for constant in ("RETRY_ON_BLOCKED", "BLOCK_RETRIES_WITHOUT_POOL",
                      "SOLVES_PER_PAGE"):
-        check("page_flow.%s is CONSULTED by an engine" % constant,
+        check("page_flow.%s is CONSULTED by the run" % constant,
               constant in joined,
               "defined in page_flow and read by nothing")
     for fn in ("pages_to_plan", "ready_selector", "min_matches",
@@ -645,7 +646,8 @@ def check_shared_calls_bind_against_the_real_signature():
                "captcha_solver": captcha_solver, "env_config": env_config,
                "diff_runs": diff_runs}
     bound = 0
-    for module in ENGINES + ("scraper_api_client",):
+    for module in ENGINES + ("run_core", "youtube_scraper",
+                             "scraper_api_client"):
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
@@ -779,11 +781,20 @@ def check_engine_flag_sets():
 
     A missing flag fails; so does closing a difference the README documents.
     """
+    # The flags are declared once, in run_core.parse_args, and the three
+    # engines re-export it — so the contract is checked THERE, and the
+    # engines are checked for agreeing with it rather than for each
+    # holding their own copy. Before 2026-09-25 they held three copies and
+    # this check was the only thing keeping them equal.
+    core_flags = _argparse_flags("run_core")
+    missing_core = (CONTRACT_FLAGS | SITE_FLAGS) - core_flags
+    check("run_core declares every contract flag", not missing_core,
+          "missing %s" % sorted(missing_core))
     sets = {}
-    for module in ENGINES:
+    for module in list(ENGINES) + ["youtube_scraper"]:
         if not os.path.exists(os.path.join(HERE, module + ".py")):
             continue
-        sets[module] = _argparse_flags(module)
+        sets[module] = _argparse_flags(module) | core_flags
     for module, flags in sets.items():
         missing = (CONTRACT_FLAGS | SITE_FLAGS) - flags
         check("%s defines every contract flag" % module, not missing,
@@ -820,11 +831,16 @@ def check_the_concurrency_difference_is_documented_in_both_directions():
     a video run can. Both directions are pinned, so closing the difference
     is a decision rather than a surprise.
     """
+    # Engine + the shared run it delegates to. Before 2026-09-25 each
+    # engine carried its own copy of the worker loop and this check was
+    # what kept the three in step; now there is one copy, and the check
+    # is what proves each engine still reaches it.
+    core = open(os.path.join(HERE, "run_core.py"), encoding="utf-8").read()
     src = {}
     for module in ENGINES:
         path = os.path.join(HERE, module + ".py")
         if os.path.exists(path):
-            src[module] = open(path, encoding="utf-8").read()
+            src[module] = open(path, encoding="utf-8").read() + core
 
     for module, text in src.items():
         check("%s implements concurrency" % module,
@@ -875,7 +891,12 @@ def check_banned_and_removed_flags():
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
-        source = open(path, encoding="utf-8").read()
+        # The engine file plus the shared run it delegates to: the
+        # refusals live in run_core.parse_args since 2026-09-25, and a
+        # scan of the engine alone would report them missing.
+        source = (open(path, encoding="utf-8").read()
+                  + open(os.path.join(HERE, "run_core.py"),
+                         encoding="utf-8").read())
         for flag in BANNED_FLAGS:
             check("%s does not define %s" % (module, flag),
                   '"%s"' % flag not in source)
@@ -1277,7 +1298,11 @@ def check_concurrency_with_the_browser_stubbed():
     results are restorable to the order they were asked for regardless of
     which worker finished first, and no worker is left running.
     """
-    engines = [(m, _import_engine(m)) for m in ENGINES]
+    # The worker loop is ONE implementation since 2026-09-25, so this
+    # drives it directly instead of once per engine — and it now runs in
+    # every environment, including one with no driver installed, which is
+    # where it used to skip.
+    engines = [("run_core", _import_engine("run_core"))]
     engines = [(m, e) for m, e in engines if e is not None]
     if not engines:
         skip("concurrency", "no engine library is importable here")
@@ -1325,18 +1350,24 @@ def check_concurrency_with_the_browser_stubbed():
             def close(self):
                 pass
 
+        # A fake DRIVER rather than a monkeypatched module-level context
+        # manager. This is what the extraction bought: the worker loop's
+        # whole decision tree is now exercisable with no driver installed
+        # at all (CLAUDE.md §26's second check).
+        class FakeDriver(engine.Driver):
+            name = "fake"
+
         originals = (engine._fetch_one_video, engine._open_session,
-                     engine._prime_session, engine._driver_context)
+                     engine._prime_session)
         try:
             engine._fetch_one_video = fake_fetch_one
             engine._open_session = lambda pw, args, pool: FakeSession()
             engine._prime_session = lambda session, args, url: 200
-            engine._driver_context = _NullContext
             outcomes = engine._fetch_videos_concurrently(
-                None, Args(), None, ids, "2026-01-01T00:00:00Z", 4)
+                FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 4)
         finally:
             (engine._fetch_one_video, engine._open_session,
-             engine._prime_session, engine._driver_context) = originals
+             engine._prime_session) = originals
 
         equal("%s: every queued video was fetched" % _module, len(fetched), len(ids))
         equal("...exactly once each", len(set(n for n, _ in fetched)), len(ids))
@@ -1360,7 +1391,11 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
     queue items, so the run finishes "successfully" with a third of the
     videos silently missing and nothing in the log about it.
     """
-    engines = [(m, _import_engine(m)) for m in ENGINES]
+    # The worker loop is ONE implementation since 2026-09-25, so this
+    # drives it directly instead of once per engine — and it now runs in
+    # every environment, including one with no driver installed, which is
+    # where it used to skip.
+    engines = [("run_core", _import_engine("run_core"))]
     engines = [(m, e) for m, e in engines if e is not None]
     if not engines:
         skip("concurrency", "no engine library is importable here")
@@ -1406,18 +1441,20 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
             def close(self):
                 pass
 
+        class FakeDriver(engine.Driver):
+            name = "fake"
+
         originals = (engine._fetch_one_video, engine._open_session,
-                     engine._prime_session, engine._driver_context)
+                     engine._prime_session)
         try:
             engine._fetch_one_video = exploding_fetch
             engine._open_session = lambda pw, args, pool: FakeSession()
             engine._prime_session = lambda session, args, url: 200
-            engine._driver_context = _NullContext
             outcomes = engine._fetch_videos_concurrently(
-                None, Args(), None, ids, "2026-01-01T00:00:00Z", 3)
+                FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 3)
         finally:
             (engine._fetch_one_video, engine._open_session,
-             engine._prime_session, engine._driver_context) = originals
+             engine._prime_session) = originals
 
         equal("%s: every video still produced an outcome" % _module, len(outcomes), len(ids))
         failed = [o for o in outcomes if not o.rows]
@@ -1433,7 +1470,7 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
                       if t is not threading.current_thread()))
 
 def check_worker_pools_start_on_different_exits():
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
         return
     from proxy_pool import ProxyPool
@@ -1503,6 +1540,15 @@ def check_every_engine_exposes_the_same_public_surface():
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target,
                                                                 ast.Name):
                 names.add(node.target.id)
+            elif isinstance(node, ast.ImportFrom):
+                # A re-exported name IS part of this module's surface, and
+                # since the run moved into run_core.py on 2026-09-25 it is
+                # how the engines carry most of theirs. Counting only
+                # `def`s here would have read "playwright_scraper no longer
+                # defines parse_args" as a regression rather than as the
+                # deduplication it was.
+                for alias in node.names:
+                    names.add(alias.asname or alias.name)
         surfaces[module] = names
 
     equal("all three engines are present to compare", len(surfaces), 3)
@@ -1510,7 +1556,8 @@ def check_every_engine_exposes_the_same_public_surface():
     # What each engine legitimately holds that its twins do not: the names
     # its own driver layer needs. Everything else must match.
     DRIVER_LOCAL = {
-        "playwright_scraper": {"sync_playwright", "PWError", "PWTimeout"},
+        "playwright_scraper": {"sync_playwright", "PWError", "PWTimeout",
+                               "to_playwright"},
         "puppeteer_scraper": {"launch", "connect", "asyncio", "concurrent",
                               "PyppeteerError", "NetworkError", "PPTimeout",
                               "_Loop", "_FETCH_JS", "RemoteBrowserError",
@@ -1538,7 +1585,7 @@ def check_every_engine_exposes_the_same_public_surface():
                      "_worker_pool", "_run_comments", "_run_video",
                      "_run_search", "_open_session", "_prime_session",
                      "_fetch_with_policy", "handle_captcha_if_present",
-                     "_proxy_failure", "_mask_credentials", "_driver_context",
+                     "_proxy_failure", "_mask_credentials",
                      "_rotate_if_per_page", "_run_replies",
                      "PLAYER_ONLY_FIELDS"):
             check("%s defines %s" % (module, name), name in names_in)
@@ -1578,7 +1625,12 @@ def check_every_solve_is_counted_against_the_budget():
     Inherited rather than measured here: this site has refused nothing, so
     no run of this repo has ever bought a solve.
     """
-    for module in ENGINES:
+    # The router, the browser handler and the budget all moved into
+    # run_core.py on 2026-09-25, so this is now ONE place rather than
+    # three — which is the whole reason the extraction was worth doing:
+    # §23 records a sibling where the same cap was enforced at one of two
+    # call sites and one page bought three solves.
+    for module in ("run_core",):
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
@@ -1607,7 +1659,7 @@ def check_every_solve_is_counted_against_the_budget():
     equal("a zero budget buys nothing", page_flow.SolveBudget(0).spend(), False)
 
     # And a solver call must sit behind it, not beside it.
-    for module in ENGINES:
+    for module in ("run_core",):
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
@@ -1645,7 +1697,11 @@ def check_a_dead_proxy_is_reported_as_a_proxy_failure():
         path = os.path.join(HERE, module + ".py")
         if not os.path.exists(path):
             continue
-        source = open(path, encoding="utf-8").read()
+        # `_fetch_with_policy` moved into run_core.py on 2026-09-25 and
+        # the engines re-export it; the decision is still one place, it is
+        # just no longer three.
+        source = open(os.path.join(HERE, "run_core.py"),
+                      encoding="utf-8").read()
         # Anchored on the FUNCTION that carries the decision, not on the
         # first `except _TransportError` in the file — which is the
         # client-version fallback in `_prime_session` and comes earlier.
@@ -2711,9 +2767,9 @@ def check_a_lost_reply_thread_makes_the_run_partial():
     complete. Both halves are pinned here: the accounting, and the
     completeness rule underneath it.
     """
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
-        skip("playwright_scraper", "engine library absent")
+        skip("run_core", "unreachable: run_core needs no driver")
         return
 
     watch, page = FIX["watch"], FIX["comments_top_p1"]
@@ -2785,9 +2841,9 @@ def check_a_video_row_missing_its_player_fields_is_not_complete():
     SUCCESSFUL outcome: exit 0, `status: complete`, four empty columns and
     nothing to tell them from a video that genuinely has no category.
     """
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
-        skip("playwright_scraper", "engine library absent")
+        skip("run_core", "unreachable: run_core needs no driver")
         return
 
     watch, player = FIX["watch"], FIX["player"]
@@ -2831,9 +2887,9 @@ def check_per_page_rotation_actually_rotates_per_page():
     rotated once too often: it took a new exit after the LAST page too,
     tearing down a browser for a request that never came.
     """
-    engine = _import_engine("playwright_scraper")
+    engine = _import_engine("run_core")
     if engine is None:
-        skip("playwright_scraper", "engine library absent")
+        skip("run_core", "unreachable: run_core needs no driver")
         return
 
     watch, page = FIX["watch"], FIX["comments_top_p1"]
