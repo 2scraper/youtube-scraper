@@ -104,6 +104,9 @@ class _BrowserSession:
 
     # The tuple this engine's library raises. `run_core` reads it off
     # the session, so the shared loop never names a driver.
+    # Named so the sidecar can report which transport ran.
+    transport = "browser"
+
     errors = DriverError
 
     def __init__(self, driver, proxy_url: Optional[str],

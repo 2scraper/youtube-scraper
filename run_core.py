@@ -117,12 +117,20 @@ class PageOutcome:
     worker finished first. Workers return these and the caller sorts.
     """
     number: int
+    # Which video this outcome is about. The sidecar used to name a
+    # position instead ("number": 2), which a reader can only resolve by
+    # re-deriving the input order — and cannot resolve at all once a
+    # worker fails before the order is established (2026-09-25 audit, F06).
+    video_id: Optional[str] = None
     rows: List[Any] = field(default_factory=list)
     state: str = parser.STATE_UNKNOWN
     status: Optional[int] = None
     blocked: bool = False
     error: Optional[str] = None
     next_token: Optional[str] = None
+    # Which of the /player-only columns the SITE left empty on a row whose
+    # /player call DID answer. Information for the sidecar, never a fault.
+    player_fields_empty: List[str] = field(default_factory=list)
     payload: Optional[Any] = None
     attempted: bool = True
 
@@ -192,9 +200,18 @@ def _open_http(args, pool: Optional[ProxyPool]) -> HttpSession:
                        "Use --transport browser for a full one.")
     return HttpSession(proxy_url, user_agent, FALLBACK_CLIENT_VERSION)
 
-def _open_session(pw, args, pool: Optional[ProxyPool]):
-    if getattr(args, "transport", "auto") in ("auto", "http") \
-            and not args.cdp_endpoint:
+def _open_session(pw, args, pool: Optional[ProxyPool], transport=None):
+    """Open the transport this WORKER is on.
+
+    `transport` is passed explicitly rather than read from `args` because
+    the `auto` fallback used to escalate by assigning
+    `args.transport = "browser"` — and `args` is one object shared by
+    every worker, so one worker meeting a refusal silently switched all of
+    them (2026-09-25 audit, §5.4). The escalation is now recorded on the
+    worker's own session box.
+    """
+    transport = transport or getattr(args, "transport", "auto")
+    if transport in ("auto", "http") and not args.cdp_endpoint:
         return _open_http(args, pool)
     session = (pw.connect_remote(args) if args.cdp_endpoint
                else pw.launch_local(args, pool))
@@ -422,7 +439,8 @@ def _fetch_with_policy(session_box: Dict[str, Any], pw, args,
                 if pool:
                     pool.advance(exit_failed)
                     session_box["session"].close()
-                    session_box["session"] = _open_session(pw, args, pool)
+                    session_box["session"] = _open_session(
+                        pw, args, pool, session_box.get("transport"))
                     _prime_session(session_box["session"], args,
                                    session_box["prime_url"])
             else:
@@ -441,15 +459,20 @@ def _fetch_with_policy(session_box: Dict[str, Any], pw, args,
             # once will challenge again, and flapping between transports
             # would pay the browser's start-up cost on every page while
             # looking like it was trying something new.
-            if (getattr(args, "transport", "auto") == "auto"
+            if (session_box.get("transport",
+                                getattr(args, "transport", "auto")) == "auto"
                     and isinstance(session_box["session"], HttpSession)):
                 logger.warning("%s was refused over plain HTTP (%s) — "
                                "starting a browser and retrying. This is "
                                "what --transport auto is for, and it happens "
                                "once per run.", label, state)
                 session_box["session"].close()
-                args.transport = "browser"
-                session_box["session"] = _open_session(pw, args, pool)
+                session_box["transport"] = "browser"
+                session_box.setdefault("fallbacks", []).append(
+                    {"at": label, "from": "http", "to": "browser",
+                     "reason": state})
+                session_box["session"] = _open_session(
+                    pw, args, pool, transport="browser")
                 _prime_session(session_box["session"], args,
                                session_box["prime_url"])
                 continue
@@ -472,7 +495,8 @@ def _fetch_with_policy(session_box: Dict[str, Any], pw, args,
                             "rotation is a fresh browser, never a proxy "
                             "swapped under a live session.")
                 session_box["session"].close()
-                session_box["session"] = _open_session(pw, args, pool)
+                session_box["session"] = _open_session(
+                    pw, args, pool, session_box.get("transport"))
                 _prime_session(session_box["session"], args,
                                session_box["prime_url"])
         logger.info("%s: state %s, retrying (%d/%d) in %.1fs",
@@ -505,7 +529,8 @@ def _rotate_if_per_page(session_box, pw, args, pool, why: str) -> bool:
         return False
     pool.advance(why)
     session_box["session"].close()
-    session_box["session"] = _open_session(pw, args, pool)
+    session_box["session"] = _open_session(pw, args, pool,
+                                           session_box.get("transport"))
     _prime_session(session_box["session"], args, session_box["prime_url"])
     return True
 
@@ -767,16 +792,18 @@ def _fetch_one_video(session_box, pw, args, pool, video_id: str,
         video_body(video_id, version, args.locale, args.region),
         "next", f"watch {video_id}")
     if state == parser.STATE_VIDEO_UNAVAILABLE:
-        return PageOutcome(number=number, state=state, status=status,
-                           error="video unavailable")
+        return PageOutcome(number=number, video_id=video_id, state=state,
+                           status=status, error="video unavailable")
     if state not in (parser.STATE_CONTENT, parser.STATE_COMMENTS_DISABLED):
-        return PageOutcome(number=number, state=state, status=status,
-                           blocked=blocked, error=f"state {state}")
+        return PageOutcome(number=number, video_id=video_id, state=state,
+                           status=status, blocked=blocked,
+                           error=f"state {state}")
 
     row = parse_video(watch, video_id=video_id, scraped_at=scraped_at,
                       row_cls=Video)
     if row is None:
-        return PageOutcome(number=number, state="parse_error", status=status,
+        return PageOutcome(number=number, video_id=video_id,
+                           state="parse_error", status=status,
                            error="watch payload parsed to no row")
 
     # The second call, and the only reason this mode makes two: `/player`
@@ -800,22 +827,56 @@ def _fetch_one_video(session_box, pw, args, pool, video_id: str,
     #
     # Before this, a `/player` failure logged a warning and returned a
     # SUCCESSFUL outcome: exit 0, status complete, four empty columns.
-    missing = [name for name in PLAYER_ONLY_FIELDS
-               if getattr(row, name, None) in (None, "", [])]
-    row.data_source = ("innertube.watch+player" if not missing
+    # Three different facts, which this used to collapse into one
+    # (2026-09-25 audit, F05):
+    #
+    #   1. did `/player` answer with a payload we could read?
+    #   2. if it did, which of its columns did the SITE leave empty?
+    #   3. is the run therefore incomplete?
+    #
+    # The old code asked only "is any of the four fields empty?" and
+    # answered all three with it. A video whose uploader set no tags —
+    # `keywords` is an uploader's choice, not a fact about the video —
+    # came back `player_incomplete: keywords`, `data_source:
+    # innertube.watch`, and made the whole run partial, while the values
+    # from `/player` were already merged into the row. Both the status and
+    # the provenance were wrong, in opposite directions.
+    #
+    # Whether the source answered is structural: `apply_player` reads
+    # `videoDetails` and `microformat`, so their presence is exactly the
+    # question "was there anything to apply".
+    micro = ((player or {}).get("microformat") or {}) \
+        if isinstance(player, dict) else {}
+    player_answered = bool(
+        isinstance(player, dict)
+        and (player.get("videoDetails")
+             or micro.get("playerMicroformatRenderer")))
+    empty = [name for name in PLAYER_ONLY_FIELDS
+             if getattr(row, name, None) in (None, "", [])]
+    row.data_source = ("innertube.watch+player" if player_answered
                        else "innertube.watch")
-    if missing:
+    if not player_answered:
+        # Name WHY, which is now possible: since the classifier reads
+        # `playabilityStatus` structurally, `state2` says "challenge",
+        # "auth_required" or "video_unavailable" instead of the "content"
+        # that a refusal used to be mistaken for.
         logger.warning("/player did not answer for %s (state %s), so %s "
                        "%s null on this row. The run is PARTIAL rather than "
                        "complete, because those columns are why this mode "
                        "makes a second call.", video_id, state2,
-                       ", ".join(missing), "is" if len(missing) == 1 else "are")
-        return PageOutcome(number=number, rows=[row],
+                       ", ".join(PLAYER_ONLY_FIELDS), "are")
+        return PageOutcome(number=number, video_id=video_id, rows=[row],
                            state=parser.STATE_CONTENT, status=status,
-                           blocked=blocked, error="player_incomplete: "
-                           + ",".join(missing))
-    return PageOutcome(number=number, rows=[row], state=parser.STATE_CONTENT,
-                       status=status, blocked=blocked)
+                           blocked=blocked,
+                           error="player_unanswered: %s" % state2)
+    if empty:
+        # The source answered and the site published nothing for these.
+        # Information, not a fault: the run stays complete.
+        logger.info("%s: /player answered and published no %s.",
+                    video_id, ", ".join(empty))
+    return PageOutcome(number=number, video_id=video_id, rows=[row],
+                       state=parser.STATE_CONTENT, status=status,
+                       blocked=blocked, player_fields_empty=empty)
 
 def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
     ids = _video_ids(args)
@@ -855,9 +916,22 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
     # Counted separately so the sidecar can say which videos are short and
     # of what, rather than folding them into `pages_failed` where a reader
     # would take them for videos that never arrived at all.
-    incomplete = [{"number": o.number, "missing": (o.error or "").split(": ")[-1]}
+    # Named by VIDEO, not by position. A sidecar entry reading
+    # `{"number": 2}` can only be resolved by re-deriving the input order,
+    # and cannot be resolved at all when the failure happened before that
+    # order was established (2026-09-25 audit, F06).
+    incomplete = [{"video_id": o.video_id, "number": o.number,
+                   "reason": (o.error or "").split(": ", 1)[-1]}
                   for o in outcomes if o.rows and o.error
-                  and o.error.startswith("player_incomplete")]
+                  and o.error.startswith("player_unanswered")]
+    failed_videos = [{"video_id": o.video_id, "number": o.number,
+                      "reason": o.error}
+                     for o in outcomes if not o.rows and o.attempted]
+    # The site answered and published nothing for these columns. Not a
+    # fault and not a reason to be partial — recorded so a consumer can
+    # tell "YouTube has no category for this video" from "we never asked".
+    empty_columns = sorted({name for o in outcomes
+                            for name in o.player_fields_empty})
     if incomplete:
         stop_reason = "player_incomplete"
     elif len(ids) == 1 and rows:
@@ -867,7 +941,10 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
     return rows, {"stop_reason": stop_reason, "pages_completed": completed,
                   "pages_failed": failed, "blocked": blocked,
                   "videos_requested": len(ids),
+                  "video_ids": list(ids),
+                  "videos_failed": failed_videos or None,
                   "videos_incomplete": incomplete or None,
+                  "player_columns_empty": empty_columns or None,
                   "client_version": session_box["session"].client_version}
 
 def _fetch_videos_concurrently(pw, args, pool, ids, scraped_at, workers):
@@ -884,31 +961,50 @@ def _fetch_videos_concurrently(pw, args, pool, ids, scraped_at, workers):
     results: List[PageOutcome] = []
     lock = threading.Lock()
 
+    startup_errors: List[str] = []
+
     def worker(index: int):
-        worker_pool = _worker_pool(pool, index)
-        with pw.context() as own_pw:
-            box = {"session": _open_session(own_pw, args, worker_pool),
-                   "prime_url": canonical_video_url(ids[0])}
-            try:
-                _prime_session(box["session"], args, box["prime_url"])
-                while True:
-                    try:
-                        number, vid = work.get_nowait()
-                    except queue.Empty:
-                        return
-                    try:
-                        outcome = _fetch_one_video(box, own_pw, args,
-                                                   worker_pool, vid, number,
-                                                   scraped_at)
-                    except Exception as exc:               # noqa: BLE001
-                        # A worker that raises must neither hang the run nor
-                        # lose its siblings' pages (CLAUDE.md §10).
-                        outcome = PageOutcome(number=number, state="error",
-                                              error=_mask_credentials(exc))
-                    with lock:
-                        results.append(outcome)
-            finally:
-                box["session"].close()
+        # EVERYTHING a worker does is inside this try, including opening
+        # its browser and priming it. The 2026-09-25 audit's F04: those
+        # three lines used to sit OUTSIDE it, so a worker that died before
+        # its first fetch printed a traceback to stderr, left its queued
+        # videos untouched, and `thread.join()` reported nothing — a run
+        # that never reached the site came back `stop_reason: completed`,
+        # `pages_failed: []`, and `finish_run` then called zero rows an
+        # empty catalogue. Reproduced by making `_open_session` raise.
+        try:
+            worker_pool = _worker_pool(pool, index)
+            with pw.context() as own_pw:
+                box = {"transport": getattr(args, "transport", "auto"),
+                       "prime_url": canonical_video_url(ids[0])}
+                box["session"] = _open_session(own_pw, args, worker_pool,
+                                               box["transport"])
+                try:
+                    _prime_session(box["session"], args, box["prime_url"])
+                    while True:
+                        try:
+                            number, vid = work.get_nowait()
+                        except queue.Empty:
+                            return
+                        try:
+                            outcome = _fetch_one_video(box, own_pw, args,
+                                                       worker_pool, vid,
+                                                       number, scraped_at)
+                        except Exception as exc:           # noqa: BLE001
+                            # A worker that raises must neither hang the run
+                            # nor lose its siblings' pages (CLAUDE.md §10).
+                            outcome = PageOutcome(
+                                number=number, video_id=vid, state="error",
+                                error=_mask_credentials(exc))
+                        with lock:
+                            results.append(outcome)
+                finally:
+                    box["session"].close()
+        except Exception as exc:                           # noqa: BLE001
+            reason = _mask_credentials(exc)
+            logger.error("Worker %d could not start: %s", index, reason)
+            with lock:
+                startup_errors.append(reason)
 
     threads = [threading.Thread(target=worker, args=(i,), daemon=True)
                for i in range(workers)]
@@ -916,6 +1012,24 @@ def _fetch_videos_concurrently(pw, args, pool, ids, scraped_at, workers):
         thread.start()
     for thread in threads:
         thread.join()
+
+    # Reconcile: every id asked for must be accounted for, as a row or as
+    # a named failure. A worker dying at startup leaves its queue entries
+    # untouched, and counting outcomes would silently under-report — the
+    # defect this whole block exists to close. The set comparison cannot
+    # miss a case a list of reasons has not been taught about.
+    accounted = {o.number for o in results}
+    if startup_errors:
+        why = "; ".join(sorted(set(startup_errors))[:3])
+    else:
+        why = ("no worker reported an outcome for it, and none reported "
+               "why — this should not happen and nothing can be concluded "
+               "about the video from it")
+    for number, vid in enumerate(ids, start=1):
+        if number not in accounted:
+            results.append(PageOutcome(
+                number=number, video_id=vid, state="error",
+                error="not fetched: %s" % why))
     return results
 
 def _worker_pool(pool: Optional[ProxyPool], worker_index: int):
@@ -1001,16 +1115,29 @@ def scrape(driver, args) -> int:
                        "get it scored than to gather data.",
                        args.concurrency, args.concurrency)
 
-    prime_url = (canonical_video_url(video_id_from_url(args.url) or "")
-                 if args.mode != "search" else
-                 "https://www.youtube.com/results?search_query=" +
-                 (args.url or "").replace(" ", "+"))
+    # The ids are normalised ONCE, here, before any session is opened.
+    # `--mode video` takes a comma-separated list, and this line used to
+    # hand the whole list to `video_id_from_url`, which recognises one id
+    # and returned None — so `prime_url` became the bare
+    # "https://www.youtube.com/watch?v=" that then went into the sidecar as
+    # both start_url and final_url (2026-09-25 audit, F06). Every batch run
+    # recorded an address that identifies nothing.
+    input_ids = _video_ids(args) if args.mode == "video" else []
+    if args.mode == "search":
+        prime_url = ("https://www.youtube.com/results?search_query="
+                     + (args.url or "").replace(" ", "+"))
+    elif input_ids:
+        prime_url = canonical_video_url(input_ids[0])
+    else:
+        prime_url = canonical_video_url(video_id_from_url(args.url) or "")
 
     rows: List[Any] = []
     meta: Dict[str, Any] = {}
     with driver.context() as pw:
-        session_box = {"session": _open_session(pw, args, pool),
+        session_box = {"transport": getattr(args, "transport", "auto"),
                        "prime_url": prime_url}
+        session_box["session"] = _open_session(pw, args, pool,
+                                               session_box["transport"])
         try:
             _prime_session(session_box["session"], args, prime_url)
             rows, meta = _RUNNERS[args.mode](session_box, pw, args, pool)
@@ -1021,7 +1148,20 @@ def scrape(driver, args) -> int:
     extra = {k: v for k, v in meta.items()
              if k not in ("stop_reason", "pages_completed", "pages_failed",
                           "blocked")}
+    # WHICH transport ran, not just which CLI was invoked. Every HTTP
+    # sidecar used to say `engine: playwright` and nothing else, so a
+    # reader could not tell an HTTP run from a browser run, nor see that a
+    # fallback had happened (2026-09-25 audit, F07). The engine name stays
+    # — it identifies the CLI, which is a real fact — and the transport is
+    # recorded beside it.
     extra["engine"] = driver.name
+    extra["transport_requested"] = args.transport
+    extra["transports_used"] = sorted(
+        {t for t in ([getattr(session_box.get("session"), "transport", None)]
+                     + [f["from"] for f in session_box.get("fallbacks", [])]
+                     + [f["to"] for f in session_box.get("fallbacks", [])])
+         if t})
+    extra["fallback_events"] = session_box.get("fallbacks") or None
     extra["category"] = args.category
     if video:
         extra["video_title"] = video.get("title")
@@ -1050,7 +1190,12 @@ def scrape(driver, args) -> int:
         pages_requested=args.pages,
         pages_completed=int(meta.get("pages_completed") or 0),
         pages_failed=meta.get("pages_failed") or None,
-        start_url=prime_url, final_url=prime_url,
+        # What the CALLER asked for, and what was actually addressed.
+        # For a batch these differ: the request is a list and the priming
+        # navigation is its first member.
+        start_url=(args.url if args.mode == "video" and len(input_ids) > 1
+                   else prime_url),
+        final_url=prime_url,
         mode=args.mode, source=SOURCE_DEFAULT, extra=extra)
 
 def parse_args(argv: Optional[List[str]] = None):

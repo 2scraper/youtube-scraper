@@ -1361,7 +1361,8 @@ def check_concurrency_with_the_browser_stubbed():
                      engine._prime_session)
         try:
             engine._fetch_one_video = fake_fetch_one
-            engine._open_session = lambda pw, args, pool: FakeSession()
+            engine._open_session = (lambda pw, args, pool, transport=None:
+                                    FakeSession())
             engine._prime_session = lambda session, args, url: 200
             outcomes = engine._fetch_videos_concurrently(
                 FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 4)
@@ -1448,7 +1449,8 @@ def check_a_dead_worker_neither_hangs_nor_loses_its_siblings():
                      engine._prime_session)
         try:
             engine._fetch_one_video = exploding_fetch
-            engine._open_session = lambda pw, args, pool: FakeSession()
+            engine._open_session = (lambda pw, args, pool, transport=None:
+                                    FakeSession())
             engine._prime_session = lambda session, args, url: 200
             outcomes = engine._fetch_videos_concurrently(
                 FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 3)
@@ -1730,7 +1732,7 @@ def check_a_dead_proxy_is_reported_as_a_proxy_failure():
               "a retry through the same dead exit is repetition, not a "
               "second attempt")
         check("%s rebuilds the browser when it rotates" % module,
-              "_open_session(pw, args, pool)" in branch,
+              "_open_session(" in branch and "pool," in branch,
               "a rotation is a fresh browser, never a proxy swapped under "
               "a live session")
         check("%s still has a plain message for a non-proxy failure" % module,
@@ -2742,7 +2744,8 @@ def _with_stubs(engine, fetch, body):
 
     original = (engine._open_session, engine._prime_session,
                 engine._fetch_with_policy)
-    engine._open_session = lambda pw, args, pool: FakeSession()
+    engine._open_session = (lambda pw, args, pool, transport=None:
+                                    FakeSession())
     engine._prime_session = lambda session, args, url: 200
     engine._fetch_with_policy = fetch
     try:
@@ -2865,14 +2868,184 @@ def check_a_video_row_missing_its_player_fields_is_not_complete():
     equal("the run names the gap", meta["stop_reason"], "player_incomplete")
     check("...and that is not a complete reason",
           "player_incomplete" not in output_writer.COMPLETE_STOP_REASONS)
-    check("the sidecar names the missing columns",
-          bool(meta.get("videos_incomplete"))
-          and "published_at" in meta["videos_incomplete"][0]["missing"])
+    entry = (meta.get("videos_incomplete") or [{}])[0]
+    check("the sidecar names the VIDEO, not a position",
+          entry.get("video_id") == rows[0].sku, repr(entry))
+    check("...and says why the source did not answer",
+          product_parser.STATE_ERROR in (entry.get("reason") or ""),
+          repr(entry.get("reason")))
     for field in engine.PLAYER_ONLY_FIELDS:
         equal("%s is null without /player" % field,
               getattr(rows[0], field), None)
     check("but the watch columns are untouched",
           rows[0].view_count is not None and bool(rows[0].title))
+
+
+def check_the_sidecar_says_which_transport_ran():
+    """F07. Every HTTP sidecar said `engine: playwright` and nothing else.
+
+    The engine name is a true fact — it names the CLI that was invoked —
+    but it answers a question nobody asked. A reader could not tell an
+    HTTP run from a browser run, and could not see that `--transport auto`
+    had escalated to a browser partway through, which is exactly the event
+    that explains a change in timing, in cost and in what the site saw.
+
+    This check exists because the control for the fix stayed GREEN: the
+    fields were added and nothing asserted them, which satisfies a green
+    suite perfectly (CLAUDE.md §26).
+    """
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+    source = open(os.path.join(HERE, "run_core.py"), encoding="utf-8").read()
+    for field in ("transport_requested", "transports_used",
+                  "fallback_events"):
+        check("the sidecar carries %s" % field,
+              'extra["%s"]' % field in source,
+              "a run's transport is not recoverable from its artefacts")
+    # The escalation must be recorded where it happens, and must NOT be
+    # written onto the shared args object: one worker meeting a refusal
+    # would otherwise switch every worker's transport mid-run.
+    check("the auto fallback records itself on the worker's own box",
+          'session_box["transport"] = "browser"' in source
+          and 'session_box.setdefault("fallbacks"' in source)
+    # Asserted over the AST, not over the text: the docstring that
+    # explains why this assignment was removed contains the assignment,
+    # and a substring check read its own explanation as the defect
+    # (CLAUDE.md §22 — a note about a banned phrase is a use of it).
+    assigns_transport = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute) and target.attr == "transport"
+        and isinstance(target.value, ast.Name) and target.value.id == "args"]
+    check("...and no longer assigns args.transport",
+          not assigns_transport,
+          "args is one object shared by every worker (audit 2026-09-25); "
+          "found at line(s) %s" % [n.lineno for n in assigns_transport])
+    check("_open_session takes the transport explicitly",
+          "def _open_session(pw, args, pool: Optional[ProxyPool], "
+          "transport=None)" in source)
+    # And each session names its own transport, which is what the sidecar
+    # reads: a string computed in the writer could drift from reality.
+    import http_transport
+    equal("an HTTP session calls itself http",
+          http_transport.HttpSession.transport, "http")
+
+
+def check_a_worker_that_dies_at_startup_is_still_accounted_for():
+    """F04, and the worst of the 2026-09-25 audit's findings, because the
+    run reported success while holding nothing.
+
+    `pw.context()`, `_open_session` and `_prime_session` used to sit
+    OUTSIDE the try that turns an exception into a `PageOutcome`. A worker
+    that died on any of them printed a traceback to stderr, left its
+    queued videos in the queue, and `thread.join()` passed the failure to
+    nobody. The run then came back:
+
+        rows 0 · stop_reason "completed" · pages_failed [] · requested 2
+
+    and `finish_run`, reading a complete reason and no failures, called
+    zero rows an EMPTY CATALOGUE — exit 4 — for a run that never reached
+    the site. That is §25's defect arriving through a door §25 did not
+    close: the completeness rule was right, and the evidence handed to it
+    was empty.
+
+    The fix is a reconciliation rather than another reason in a list: the
+    set of ids asked for must equal the set accounted for. A set
+    comparison cannot miss a case nobody has taught it about.
+    """
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+
+    class FakeDriver(engine.Driver):
+        name = "fake"
+
+    ids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc"]
+
+    class Args:
+        mode = "video"
+        transport = "http"
+        cdp_endpoint = None
+        delay = 0
+        proxy_rotate = "per-run"
+
+    original = engine._open_session
+    try:
+        def explode(pw, args, pool, transport=None):
+            raise RuntimeError("startup failure")
+        engine._open_session = explode
+        outcomes = engine._fetch_videos_concurrently(
+            FakeDriver(), Args(), None, ids, "2026-01-01T00:00:00Z", 2)
+    finally:
+        engine._open_session = original
+
+    equal("every requested video is accounted for", len(outcomes), len(ids))
+    equal("...by id, not by position",
+          sorted(o.video_id for o in outcomes), sorted(ids))
+    check("none of them claims rows", all(not o.rows for o in outcomes))
+    check("each names the startup failure",
+          all("startup failure" in (o.error or "") for o in outcomes),
+          repr([o.error for o in outcomes][:1]))
+    # And the consequence the sidecar carries: these count as failures, so
+    # the run cannot report itself complete.
+    check("they count as attempted failures",
+          all(o.attempted for o in outcomes))
+
+
+def check_an_empty_optional_column_is_not_a_failed_run():
+    """F05, the other direction, and the one that was actually wrong.
+
+    `keywords` is a list of tags the UPLOADER chose to set. A video with
+    none is ordinary. The old code asked one question — "is any of the
+    four /player columns empty?" — and answered three with it: it called
+    the source unanswered, wrote `data_source: innertube.watch` on a row
+    whose /player values had ALREADY been merged in, and made the whole
+    run partial.
+
+    So a perfectly good video with no tags reported exit 6, and a reader
+    comparing two runs saw the provenance change under them.
+    """
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+
+    watch = FIX["watch"]
+    # A /player answer that IS an answer: videoDetails and microformat
+    # present, and no keywords in it, exactly as the site sends for a
+    # video whose uploader set no tags.
+    player = {"playabilityStatus": {"status": "OK"},
+              "videoDetails": {"lengthSeconds": "212", "viewCount": "1"},
+              "microformat": {"playerMicroformatRenderer": {
+                  "publishDate": "2009-10-25", "category": "Music"}}}
+
+    def fetch(box, pw, args, pool, body, endpoint, label):
+        if endpoint == "player":
+            return 200, player, product_parser.STATE_CONTENT, False
+        return 200, watch, product_parser.STATE_CONTENT, False
+
+    def body(FakeSession):
+        args = _fault_args(engine, mode="video", pages=1)
+        box = {"session": FakeSession(), "prime_url": "u"}
+        return engine._run_video(box, None, args, pool=None)
+
+    rows, meta = _with_stubs(engine, fetch, body)
+    equal("the row is written", len(rows), 1)
+    equal("keywords really is empty", rows[0].keywords or [], [])
+    equal("the date came from /player", rows[0].published_at, "2009-10-25")
+    # The two assertions that failed before the fix.
+    equal("provenance names BOTH sources", rows[0].data_source,
+          "innertube.watch+player")
+    check("the run is NOT partial for an empty optional column",
+          meta["stop_reason"] != "player_incomplete"
+          and not meta.get("videos_incomplete"), repr(meta["stop_reason"]))
+    check("but the empty column is still recorded",
+          "keywords" in (meta.get("player_columns_empty") or []),
+          repr(meta.get("player_columns_empty")))
 
 
 def check_per_page_rotation_actually_rotates_per_page():
