@@ -35,10 +35,10 @@ from __future__ import annotations
 import time
 from typing import Callable, Optional
 
-from product_parser import (STATE_CHALLENGE, STATE_COMMENTS_DISABLED,
-                            STATE_CONTENT, STATE_EMPTY, STATE_ERROR,
-                            STATE_UNKNOWN, STATE_VIDEO_UNAVAILABLE,
-                            detect_page_state)
+from product_parser import (STATE_AUTH_REQUIRED, STATE_CHALLENGE,
+                            STATE_COMMENTS_DISABLED, STATE_CONTENT,
+                            STATE_EMPTY, STATE_ERROR, STATE_UNKNOWN,
+                            STATE_VIDEO_UNAVAILABLE, detect_page_state)
 
 # ---------------------------------------------------------------------------
 # Readiness — for the browser engines only
@@ -159,6 +159,14 @@ STATE_POLICY = {
     # it far more cheaply than a solve does.
     STATE_CHALLENGE: {"retry": True, "solve": True, "blocked": True,
                       "parse": False},
+    # The site wants a signed-in account, and NOT because it doubts we
+    # are human: an age-restricted, private or members-only video. A real
+    # answer about the video, so it is not blocked and not retried — a
+    # different exit cannot change the viewer's age — and above all it
+    # must not solve, because there is no challenge on the page to solve
+    # (CLAUDE.md §19: "unsolvable" is a property of a PAGE).
+    STATE_AUTH_REQUIRED: {"retry": False, "solve": False, "blocked": False,
+                          "parse": False},
     # An HTTP error that is not a recognised refusal — a 500, a gateway's
     # own page, a truncated body. A wait, not a spend.
     STATE_ERROR: {"retry": True, "solve": False, "blocked": False,

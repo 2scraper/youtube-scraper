@@ -70,6 +70,14 @@ def _mask(text: Any) -> str:
 class HttpSession:
     """A `requests` session shaped like the browser sessions it replaces."""
 
+    # What "the driver failed" means for this transport. `run_core` reads
+    # it off the session rather than off a module constant, so the shared
+    # loop never has to know which library is underneath it.
+    # Named so the sidecar can report which transport ran.
+    transport = "http"
+
+    errors = (TransportError,)
+
     def __init__(self, proxy_url: Optional[str], user_agent: str,
                  client_version: str):
         self.session = requests.Session()

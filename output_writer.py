@@ -604,10 +604,49 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
               f"Pass --allow-empty if an empty result is the expected answer.")
         return EXIT_NO_PRODUCTS
 
-    if fmt in ("json", "both"):
+    # `--format both` publishes TWO files, and each one's own write is
+    # atomic (see `_atomic`) — but that says nothing about the pair. The
+    # 2026-09-25 audit's F08: JSON was renamed into place, then a line was
+    # printed, then the whole CSV was serialised, then IT was renamed. A
+    # kill anywhere in that gap left a new JSON beside a stale CSV, and a
+    # sidecar describing neither.
+    #
+    # What is NOT done here, deliberately: the audit proposed a directory
+    # per run with a manifest and checksums, and a pointer published at
+    # the end. That is a better guarantee and it is a different OUTPUT
+    # CONTRACT — `<out>.json` / `<out>.csv` / `<out>.meta.json` is fixed
+    # across this family and `diff_runs.py` is built on it. Trading it for
+    # a window nobody has reproduced is the wrong exchange.
+    #
+    # So the window is narrowed inside the contract: BOTH files are
+    # written and fsynced first, and the two renames then run
+    # back-to-back with nothing between them. The gap goes from "a print
+    # and a full CSV serialisation" to one `os.replace`. It is smaller,
+    # not zero, and saying so is the point — a guarantee this module
+    # cannot give should not be claimed in a docstring.
+    if fmt == "both":
+        staged_json = f"{out_prefix}.json.staging"
+        staged_csv = f"{out_prefix}.csv.staging"
+        try:
+            write_json(rows, staged_json)
+            write_csv(rows, staged_csv, row_cls=row_cls)
+            os.replace(staged_json, f"{out_prefix}.json")
+            os.replace(staged_csv, f"{out_prefix}.csv")
+        except BaseException:
+            for leftover in (staged_json, staged_csv):
+                try:
+                    os.unlink(leftover)
+                except OSError:
+                    pass
+            raise
+        print(f"[+] Saved {len(rows)} rows -> {out_prefix}.json")
+        print(f"[+] Saved {len(rows)} rows -> {out_prefix}.csv")
+        return 0 if rows else EXIT_NO_PRODUCTS
+
+    if fmt == "json":
         write_json(rows, f"{out_prefix}.json")
         print(f"[+] Saved {len(rows)} rows -> {out_prefix}.json")
-    if fmt in ("csv", "both"):
+    if fmt == "csv":
         write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
         print(f"[+] Saved {len(rows)} rows -> {out_prefix}.csv")
     return 0 if rows else EXIT_NO_PRODUCTS

@@ -25,6 +25,7 @@ live_results.zip
 # --- debug artifacts the engines drop next to themselves -----------------
 # Written on purpose when a page yields nothing or comes back blocked, and by
 # --dump-html on success too. Large, and stale within hours.
+*.staging
 *_debug.html
 *_debug.png
 *.html.page*
