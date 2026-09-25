@@ -2881,6 +2881,48 @@ def check_a_video_row_missing_its_player_fields_is_not_complete():
           rows[0].view_count is not None and bool(rows[0].title))
 
 
+def check_diff_runs_knows_which_columns_the_second_call_fills():
+    """Not from the audit — found by pulling on its F09 thread.
+
+    `diff_runs.PROFILE_ONLY_FIELDS` is the set of columns a row only has
+    when a second source answered, and the branch that uses it reports a
+    difference in them as `source_changed` rather than as a change: §8's
+    rule that a difference arriving WITH a provenance difference says
+    something about our own two snapshots, not about the site.
+
+    The tuple arrived from a donor repo naming a job board's columns —
+    `salary_period`, `equity_min`, `company_badges` — not one of which
+    exists here. The branch was therefore unreachable, and two columns it
+    should have covered (`duration_seconds`, `category`) are in
+    TRACKED_FIELDS, so two runs of the same video, one of which met a bot
+    challenge on `/player`, diffed as "the category changed" on every row.
+    """
+    import dataclasses, diff_runs
+    columns = {f.name for f in dataclasses.fields(output_writer.Comment)} \
+        | {f.name for f in dataclasses.fields(output_writer.Video)}
+    unknown = sorted(set(diff_runs.PROFILE_ONLY_FIELDS) - columns)
+    check("every second-call column actually exists on a row", not unknown,
+          "names no row has: %s" % unknown)
+    equal("and it is the /player set",
+          sorted(diff_runs.PROFILE_ONLY_FIELDS),
+          sorted(run_core_player_fields()))
+    # The whole point: a provenance difference must not read as news.
+    old = [{"sku": "v1", "data_source": "innertube.watch",
+            "category": None, "duration_seconds": None, "title": "t"}]
+    new = [{"sku": "v1", "data_source": "innertube.watch+player",
+            "category": "Music", "duration_seconds": 212, "title": "t"}]
+    report = diff_runs.diff_products(old, new)
+    equal("a /player column appearing is source_changed, not changed",
+          len(report.get("changed") or []), 0)
+    equal("...and it is reported as such",
+          len(report.get("source_changed") or []), 1)
+
+
+def run_core_player_fields():
+    import run_core
+    return run_core.PLAYER_ONLY_FIELDS
+
+
 def check_both_formats_are_published_back_to_back():
     """F08, in the form this repo is willing to give.
 
