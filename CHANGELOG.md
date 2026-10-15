@@ -11,6 +11,8 @@ rather than leaving it to be discovered from a bill or a chart.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-15
+
 > **Output files now honour your umask.** Every `<out>.json`, `<out>.csv`
 > and `<out>.meta.json` used to be written `0600` whatever the umask said.
 > A new file now gets `0o666 & ~umask` (`0644` under umask `022`), and a
@@ -367,5 +369,6 @@ timestamps, badges, the video and its publisher — is untouched. A comment
 is a person's writing, and republishing it is a separate act from YouTube
 showing it on its own page.
 
+[0.4.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.4.0
 [0.2.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.2.0
 [0.1.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.1.0
