@@ -16,18 +16,18 @@ python3 smoke_test.py     # the offline suite; needs no engine and no network
 | code | meaning | on this site |
 |---|---|---|
 | `0` | ok | rows were written |
-| `1` | crash | a bug, or a served page that parsed to nothing |
+| `1` | crash | a bug in this code |
 | `2` | bad usage | a URL with no video id, or two flags that contradict |
 | `3` | blocked | **never observed here.** See below — this would be news |
 | `4` | no comments | usually a real answer, not a fault |
-| `5` | remote API error | the Scraping Browser or the Scraper API failed |
-| `6` | partial | some pages arrived, then the run stopped |
+| `5` | content never obtained | no rows: the pages did not arrive, a remote service (Scraping Browser, Scraper API) failed, or a served page parsed to nothing |
+| `6` | partial | some pages arrived, then the run stopped or a later page parsed to nothing |
 
 ---
 
 ## `exit 4` — "0 rows"
 
-Three different things produce it, and only one is a problem.
+Two different things produce it, and neither is a fault.
 
 **Comments are turned off.** The log says so by name, quoting the site's
 own sentence. This is a complete answer: no proxy, key or engine will
@@ -38,11 +38,7 @@ change it. `--mode video` on the same id returns a row with
 real answer. Note that it answers HTTP 200 with a 60 KB payload, so
 "nothing came back" is not the right mental model.
 
-**A served page parsed to nothing.** This one IS a problem, and it is
-reported separately: the log says the page was served, gives its size, and
-tells you to re-run with `--dump-html`. That combination means the payload
-changed shape and this parser needs updating — it is never "the video has
-no comments". The dumped JSON is the evidence.
+A served page that parsed to nothing is NOT exit 4 — see exit 5.
 
 ---
 
@@ -87,15 +83,24 @@ the browser is and does not have that problem.
 
 ---
 
-## `exit 5` — remote API error
+## `exit 5` — the content was never obtained
+
+**A served page parsed to nothing** (`stop_reason: parse_error`). The log
+says the page was served, gives its size, and tells you to re-run with
+`--dump-html`. That means the payload changed shape and this parser needs
+updating — it is never "the video has no comments". The dumped JSON is the
+evidence. The same failure on a later page, after rows were gathered, is
+exit 6 with that page in `pages_failed`.
+
+**A dead proxy, a timeout, or a remote service failing:**
 
 **`profile_locked`** from `--cdp-endpoint`: a Scraping Browser profile
 allows ONE live connection, and another run still holds this `pid`. Use a
 different `pid`, or wait.
 
-**A 401 from the endpoint**: a profile's credentials last about a day.
-There is no working endpoint pasted anywhere in this repo for exactly that
-reason — get a fresh one rather than reusing the shape.
+**A 401 from the endpoint**: the endpoint's credentials are no longer
+accepted. There is no working endpoint pasted anywhere in this repo; take a
+current one from your 2Captcha dashboard rather than reusing the shape.
 
 **`--cdp-endpoint` on the Selenium engine** is refused outright, with the
 reason: chromedriver's `debuggerAddress` takes a bare `host:port` and

@@ -11,7 +11,9 @@ __pycache__/
 .venv/
 venv/
 env/
-wellfound_jobs.*
+*.staging
+*.html
+*.page[0-9]*
 *_debug.html
 *_debug.png
 live_results/

@@ -1,27 +1,30 @@
-name: Site changed / selectors broke
-description: Etsy changed something and the parser no longer matches.
+name: Site changed / parser broke
+description: YouTube changed something and the parser no longer matches.
 labels: ["site-change"]
 body:
   - type: markdown
     attributes:
       value: |
         This is the most common way a scraper stops working, and it is worth its
-        own report because the fix is different from a code bug: something on
-        etsy.com moved.
+        own report because the fix is different from a code bug: something in
+        YouTube's payload moved.
 
-        Useful to know before filing: the parser tries **JSON-LD first**, then a
-        CSS + URL-pattern fallback. Which one broke narrows the fix a lot.
+        Useful to know before filing: the parser reads the JSON from
+        `/youtubei/v1/next` (and `/youtubei/v1/player` for `--mode video`),
+        never the DOM. Comments come in two shapes — the entity shape first,
+        the legacy `commentRenderer` shape as a fallback — and each row's
+        `data_source` says which one it was read from.
 
   - type: dropdown
     id: what_broke
     attributes:
       label: What stopped matching
       options:
-        - Products (0 rows on a page that visibly has products)
-        - A specific field is null or wrong (price, sku, image, URL)
-        - original_price or lowest_price_30d empty out (the tile overlay)
-        - DOM price confirmation dropped below 90% in the run log
+        - Comments (0 rows on a video that visibly has comments)
+        - A specific field is null or wrong (text, author, like count, date)
+        - Replies are missing (--replies)
         - Pagination stops early or repeats a page
+        - --mode video or --mode search returns wrong or empty rows
         - The captcha detector finds nothing on a page that has one
         - Something else
     validations:
@@ -31,8 +34,8 @@ body:
     id: url
     attributes:
       label: URL
-      description: The exact listing URL, and the country your exit IP was in.
-      placeholder: "https://www.etsy.com/search?q=handmade+mug (locale: /de/, exit IP: DE residential, Scraping Browser pid: etsy1)"
+      description: The exact video URL or search query, the mode and sort, and the country your exit IP was in.
+      placeholder: "https://www.youtube.com/watch?v=dQw4w9WgXcQ (--mode comments --sort top, exit IP: FI datacentre)"
     validations:
       required: true
 
@@ -43,9 +46,9 @@ body:
       description: |
         Whichever of these you can get. A capture beats a description.
 
-        - JSON-LD as the page actually serves it:
-          `python3 -c "import json,sys,re;h=open('dump.html').read();print([m[:400] for m in re.findall(r'<script type=\"application/ld\\+json\">(.*?)</script>',h,re.S)][:2])"`
-        - Or open devtools and paste one `Product` node from the `ItemList`.
+        - The payload as the site served it: re-run with `--dump-html` and
+          attach the relevant part of the dump.
+        - For a comment problem: the comment id (`sku`) and its `data_source`.
         - For a field problem: the value you got, and the value on the page.
       render: text
     validations:

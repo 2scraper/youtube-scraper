@@ -3,7 +3,7 @@
 
 The Selenium twin of `playwright_scraper.py`. Everything from
 `_prime_session` downwards is byte-identical to that file on purpose:
-CLAUDE.md §6 requires all three engines to agree on exit codes, run status,
+all three engines must agree on exit codes, run status,
 and whether a run crashes or spends money, and the only way to keep that
 true is for the shared half to BE the same text.
 
@@ -23,13 +23,13 @@ discovered, because both are real and neither is this repo's fault:
   Playwright or pyppeteer engine for that path.
 * **Selenium's `--proxy-server` cannot authenticate at all.** Credentials
   are stripped and a warning is printed; a user must not be left believing
-  a `user:pass` URL is doing something (CLAUDE.md §6).
+  a `user:pass` URL is doing something.
 
 The InnerTube call is made by a `fetch` inside the page, through
 `execute_async_script`. Note the dialect: Selenium runs a function BODY
 with an explicit `return` and a callback as the last argument, where the
 other two drivers take `() => expr`. That difference is exactly why no
-JavaScript crosses into a shared module (CLAUDE.md §1).
+JavaScript crosses into a shared module.
 
 The run itself lives in `run_core.py` and is shared with the other
 two engines and with `youtube_scraper.py`. What stays here is what
@@ -38,7 +38,7 @@ session object. Measured on 2026-09-25, before the split: 24 of the
 29 definitions the three engines shared were byte-identical.
 
 The driver library is imported at MODULE level on purpose
-(CLAUDE.md §10): the suite's skip and CI's `python -c "import
+: the suite's skip and CI's `python -c "import
 selenium_scraper"` both depend on this module failing to import when
 Selenium is absent.
 """
@@ -96,7 +96,7 @@ fetch(spec.url, init).then(function (response) {
 class _BrowserSession:
     """A driver, a page on youtube.com, and a fetch primitive bound to it.
 
-    A rotation is a FRESH BROWSER (CLAUDE.md §8): cookies a bot manager
+    A rotation is a FRESH BROWSER: cookies a bot manager
     issued against exit A and replayed from exit B are a stronger signal
     than either address alone. So this object is torn down and rebuilt
     rather than having its proxy swapped underneath it.
@@ -184,7 +184,7 @@ class _BrowserSession:
         Wrapped in `return (…)(arg)` because `execute_script` takes a
         function BODY, where the shared captcha module hands out `() =>
         expr`. Never an evaluated string on the page's own terms: YouTube's
-        Content-Security-Policy has no `unsafe-eval` (CLAUDE.md §18), and
+        Content-Security-Policy has no `unsafe-eval`, and
         `execute_script` goes through the WebDriver protocol rather than
         through the page's `eval`.
         """
@@ -230,7 +230,7 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
             # Said out loud rather than silently dropped. Selenium cannot
             # authenticate a proxy at all, and a user who passed a
             # `user:pass` URL must not be left believing it is doing
-            # something (CLAUDE.md §6).
+            # something.
             logger.warning("Selenium cannot authenticate a proxy: the "
                            "credentials in --proxy have been STRIPPED and "
                            "only %s is in use. If this exit needs a "
@@ -262,8 +262,8 @@ def _apply_fingerprint(driver, fingerprint, user_agent) -> None:
 
     `--user-agent=` on the command line is a BARE override: it changes
     `navigator.userAgent` and leaves `navigator.userAgentData` and the
-    `Sec-CH-UA` header reporting the real browser. CLAUDE.md §24 measured
-    that half-identity being refused where a complete one was served, so
+    `Sec-CH-UA` header reporting the real browser. That half-identity was
+    measured on a sibling site being refused where a complete one was served, so
     this engine applies the same set its twins do.
 
     Best effort throughout — a fingerprint is cover, and no run should die
@@ -283,7 +283,7 @@ def _apply_fingerprint(driver, fingerprint, user_agent) -> None:
     if not metadata:
         logger.warning("The fingerprint carried no brand list, so its client "
                        "hints are left alone: a HALF identity is worse than "
-                       "none (CLAUDE.md §24).")
+                       "none.")
         return
     payload = {"userAgent": user_agent, "userAgentMetadata": metadata}
     language = accept_language(fingerprint)
@@ -329,7 +329,7 @@ class _Driver(run_core.Driver):
         """A FRESH driver, because a worker gets its own.
 
         Playwright's sync API ties a browser to the thread that
-        created it (CLAUDE.md §7), so the worker loop opens one of
+        created it, so the worker loop opens one of
         these per thread. Returning `self` would have the workers
         overwrite each other's handle — and it would have looked
         correct on a single-worker run.

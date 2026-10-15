@@ -19,7 +19,7 @@ other's population, so `data_source` is a COLUMN and `diff_runs.py` reports
 a difference that comes with a `data_source` difference as
 `source_changed` rather than as the site having changed.
 
-A repo with two row classes owes three things (CLAUDE.md §9), and they are
+A repo with two row classes owes three things, and they are
 all here: the family prefix `source, scraped_at, url, sku, title` is
 byte-identical and first in BOTH classes, `mode` is recorded in the run
 sidecar because the repo no longer implies it, and `diff_runs.py` refuses a
@@ -90,7 +90,7 @@ class Comment:
 
     The family prefix — `source`, `scraped_at`, `url`, `sku`, `title` — is
     byte-identical and in this order across every repo in the family
-    (CLAUDE.md §9). `title` is the VIDEO's title: a comment has no title of
+. `title` is the VIDEO's title: a comment has no title of
     its own, and repeating the parent's is what makes a CSV of ten
     thousand comments readable without a join.
     """
@@ -162,7 +162,7 @@ class Comment:
     pinned_by: Optional[str] = None
     # The creator's heart. Measured 2 of 70 captured comments, so this
     # column takes both its values on a single page and is genuinely
-    # verified, which CLAUDE.md §20 asks for before trusting a boolean.
+    # verified, which a boolean needs before it is trusted.
     creator_hearted: Optional[bool] = None
     # Channel ids @-mentioned in the body, read with UTF-16-correct offsets.
     mentions: Optional[List[str]] = None
@@ -171,7 +171,7 @@ class Comment:
     # Which of the site's two orderings this row was drawn from. NOT a
     # sidecar field: the ordering decides WHICH comments a capped run holds,
     # so two runs under different sorts are different samples of the same
-    # video and `diff_runs.py` refuses to compare them (CLAUDE.md §21).
+    # video and `diff_runs.py` refuses to compare them.
     sort: Optional[str] = None
     # `innertube.entity` or `innertube.legacy` — which of the site's two
     # payload shapes this row was read out of.
@@ -211,7 +211,7 @@ class Video:
     # EXACT on a watch row, and read out of the like button's accessibility
     # label — which states the number in full where the button's own text
     # is abbreviated. Read the NUMBER in that label, never every digit in
-    # it (CLAUDE.md §10). Null on a search row: the payload has none.
+    # it. Null on a search row: the payload has none.
     like_count: Optional[int] = None
     like_count_text: Optional[str] = None
     # ABBREVIATED, from the watch payload's comment panel ("2.4M"). The
@@ -340,6 +340,51 @@ def _csv_value(v: Any) -> Any:
     return v
 
 
+# A spreadsheet treats a cell beginning with one of these as a FORMULA
+# rather than as text, and every string in these rows was written by a
+# stranger: comment text, a title, a channel name. `=HYPERLINK(...)`,
+# `+cmd|...` and `@SUM(...)` are the classic shapes; the tab and the two
+# newlines are here because some readers strip a leading one and then
+# evaluate whatever followed it.
+#
+# That includes `author_name`, which on YouTube is a `@handle` on every
+# row: the whole column is prefixed in the CSV. A spreadsheet hides the
+# apostrophe; a program reading the CSV sees it, and reads the untouched
+# value from the JSON output instead.
+CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+# Excel, Google Sheets and LibreOffice read a leading apostrophe as "the
+# rest of this cell is text" and do not display it.
+CSV_FORMULA_ESCAPE = "'"
+
+
+def _csv_escape(v: Any):
+    """Neutralise a formula-shaped cell. Returns (value, was_escaped).
+
+    Only STRINGS are touched: escaping a number would turn `-5` into text
+    and break every sum over the column. CSV only — the JSON output keeps
+    the site's text exactly as served, and `csv_cells_escaped` in the
+    sidecar declares how far the two files diverge.
+    """
+    if isinstance(v, str) and v.startswith(CSV_FORMULA_LEADS):
+        return CSV_FORMULA_ESCAPE + v, True
+    return v, False
+
+
+def _target_mode(path: str) -> int:
+    """The mode a replacement for `path` should carry.
+
+    An existing file keeps its own permission bits; a new one gets
+    `0o666 & ~umask`, which is what a plain `open(path, "w")` gives.
+    """
+    try:
+        return os.stat(path).st_mode & 0o777
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
 @contextlib.contextmanager
 def _atomic(path: str, newline: Optional[str] = None):
     """Write to a temporary file beside `path`, then rename over it.
@@ -371,6 +416,13 @@ def _atomic(path: str, newline: Optional[str] = None):
             yield handle
             handle.flush()
             os.fsync(handle.fileno())
+        # `NamedTemporaryFile` creates its file at 0600 and `os.replace`
+        # keeps the temp file's mode, so without this every output came out
+        # readable by its owner alone, whatever the umask said. An existing
+        # target keeps its OWN mode (someone may have set it on purpose); a
+        # new one gets exactly what `open(path, "w")` would have given it,
+        # `0o666 & ~umask`.
+        os.chmod(handle.name, _target_mode(path))
         os.replace(handle.name, path)
     except BaseException:
         # Leave the destination untouched. A failed write must not be
@@ -387,7 +439,7 @@ def write_json(rows: Sequence[Any], path: str) -> None:
         json.dump([asdict(r) for r in rows], f, ensure_ascii=False, indent=2)
 
 
-def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Comment) -> None:
+def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Comment) -> int:
     # An empty result still gets the header row. A zero-byte file makes a
     # consumer fail on read (no columns to parse) instead of reading a valid
     # table with zero rows — and "an empty result is still a well-formed
@@ -395,12 +447,23 @@ def write_csv(rows: Sequence[Any], path: str, row_cls: Type = Comment) -> None:
     #
     # The header comes from `row_cls`, not from the first row, so an empty
     # run still writes the columns of the mode that produced it.
+    #
+    # Returns the number of cells that were formula-escaped.
     fieldnames = [f.name for f in fields(row_cls)]
+    escaped = 0
     with _atomic(path, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in rows:
-            writer.writerow({k: _csv_value(v) for k, v in asdict(r).items()})
+            row = {}
+            for k, v in asdict(r).items():
+                # AFTER the list serialiser: a list is not a string, but the
+                # joined cell it becomes can start with a formula character.
+                value, was_escaped = _csv_escape(_csv_value(v))
+                row[k] = value
+                escaped += was_escaped
+            writer.writerow(row)
+    return escaped
 
 
 # Exit code used when a run completes but produced nothing. Distinct from 1
@@ -427,7 +490,7 @@ EXIT_NO_PRODUCTS = 4
 # InnerTube pages, all HTTP 200, no refusal of any kind. Every candidate
 # text marker counted on known-good captures fired on GOOD pages —
 # `consent.youtube.com` 4 times, `botguard` 13, `recaptcha` once — so none
-# of them is carried (CLAUDE.md §18).
+# of them is carried.
 #
 # What IS carried is the HTTP status (401/403/429) and the two sentences
 # YouTube is documented to use when it demands a sign-in. Neither sentence
@@ -518,14 +581,12 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
       failed   — nothing was gathered at all
 
     `mode` and `source` are recorded because `mode` is not implied by the
-    repo: the same output prefix can hold a listings run, a job run or a
-    careers run, and those populate different columns — a listings row has
-    the site's `domain` and its slot counters, a job row has the company
-    website and a currency, a careers row has a department and an Ashby
-    apply URL. `diff_runs.py` refuses a pair whose modes or sources differ,
-    which matters more here than on most sites in this family: a careers run
-    and a marketplace run have NO ids in common at all, so a diff of the two
-    would report every row as both added and removed.
+    repo: the same output prefix can hold a comments run, a video run or a
+    search run, and those populate different columns — a comment row has
+    an author and a comment id, a video or search row has a channel and a
+    video id. `diff_runs.py` refuses a pair whose modes or sources differ:
+    a comments run and a video run have NO ids in common at all, so a diff
+    of the two would report every row as both added and removed.
 
     `source` is `youtube.com` on every row of every run. The site answers
     on four hosts and this column names the SITE rather than the host, so
@@ -542,7 +603,7 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     were expanded.
 
     That is the only honest way to say what a run holds, because "complete"
-    and "exhaustive" come apart badly here (CLAUDE.md §21). A 5-page run
+    and "exhaustive" come apart badly here. A 5-page run
     fetched every page it was asked for and is genuinely `complete`. It is
     also 100 comments out of two and a half million, which is 0.004% — and
     nothing in the row count reveals that.
@@ -562,10 +623,10 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
         "pages_requested": pages_requested,
         "pages_completed": pages_completed,
         "pages_failed": pages_failed or [],
-        # Named "products" even though these are job listings, and kept that
-        # way deliberately: every repo in this family writes this key, and a
-        # consumer reading several of them reads one sidecar shape.
-        # quora-scraper made the same call for answers. The row TYPE is
+        # Named "products" even though these are comments or videos, and kept
+        # that way deliberately: every repo in this family writes this key,
+        # and a consumer reading several of them reads one sidecar shape.
+        # The row TYPE is
         # `mode` plus `source`, which are right beside it.
         "products": products,
         "start_url": start_url,
@@ -574,14 +635,15 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
     }
     if extra:
         # Merged rather than nested under a key, so a consumer reads
-        # `shop_rating` at the top level beside `products`. Run fields win a
+        # `total_comments` at the top level beside `products`. Run fields win a
         # name collision: a caller cannot accidentally overwrite `status`.
         meta.update({k: v for k, v in extra.items() if k not in meta})
     return meta
 
 
 def save(rows: Sequence[Any], out_prefix: str, fmt: str,
-         allow_empty: bool = False, row_cls: Type = Comment) -> int:
+         allow_empty: bool = False, row_cls: Type = Comment,
+         stats: Optional[dict] = None) -> int:
     """Write JSON/CSV and return a process exit code.
 
     Returns 0 when rows were written, EXIT_NO_PRODUCTS when there were none.
@@ -597,6 +659,9 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 
     `allow_empty=True` is for the legitimate case: a filter that genuinely
     matches nothing, where an empty file is the answer.
+
+    `stats`, when given, receives `csv_cells_escaped` for any CSV written
+    (the return value is the exit code, so the count travels separately).
     """
     if not rows and not allow_empty:
         print(f"[!] 0 rows — refusing to write {out_prefix}.json/.csv, so an "
@@ -629,7 +694,11 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
         staged_csv = f"{out_prefix}.csv.staging"
         try:
             write_json(rows, staged_json)
-            write_csv(rows, staged_csv, row_cls=row_cls)
+            escaped = write_csv(rows, staged_csv, row_cls=row_cls)
+            # The staged files took a NEW file's mode; the published ones
+            # keep whatever mode the files they replace already had.
+            os.chmod(staged_json, _target_mode(f"{out_prefix}.json"))
+            os.chmod(staged_csv, _target_mode(f"{out_prefix}.csv"))
             os.replace(staged_json, f"{out_prefix}.json")
             os.replace(staged_csv, f"{out_prefix}.csv")
         except BaseException:
@@ -641,15 +710,27 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
             raise
         print(f"[+] Saved {len(rows)} rows -> {out_prefix}.json")
         print(f"[+] Saved {len(rows)} rows -> {out_prefix}.csv")
+        _report_escaped(escaped, stats)
         return 0 if rows else EXIT_NO_PRODUCTS
 
     if fmt == "json":
         write_json(rows, f"{out_prefix}.json")
         print(f"[+] Saved {len(rows)} rows -> {out_prefix}.json")
     if fmt == "csv":
-        write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
+        escaped = write_csv(rows, f"{out_prefix}.csv", row_cls=row_cls)
         print(f"[+] Saved {len(rows)} rows -> {out_prefix}.csv")
+        _report_escaped(escaped, stats)
     return 0 if rows else EXIT_NO_PRODUCTS
+
+
+def _report_escaped(escaped: int, stats: Optional[dict]) -> None:
+    if stats is not None:
+        stats["csv_cells_escaped"] = escaped
+    if escaped:
+        print(f"[!] {escaped} CSV cell(s) began with a formula character and "
+              f"were prefixed with {CSV_FORMULA_ESCAPE!r} so a spreadsheet "
+              f"reads them as text. The JSON output is unchanged — see "
+              f"csv_cells_escaped in the sidecar.")
 
 
 # Stop reasons that mean the run saw everything there was to see. Anything
@@ -668,7 +749,7 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # to go stale — a response either carries a continuation token or it is the
 # last page, and "pagination_exhausted" means the site said so itself.
 #
-# That is also why this repo cannot plan page URLs ahead (CLAUDE.md §7):
+# That is also why this repo cannot plan page URLs ahead:
 # page 5's token is unknowable until page 4 has been read, so a comments
 # run is strictly sequential and `--concurrency` above 1 is refused for it
 # with that reason. `--mode video` parallelises across VIDEOS instead,
@@ -685,7 +766,7 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 #
 # Note what it does NOT mean on this site: a `complete` comments run holds
 # every page it asked for, which is almost never every comment the video
-# has. CLAUDE.md §21 — complete and exhaustive are different words — and
+# has. Complete and exhaustive are different words, and
 # the sidecar records the site's own total beside the collected count so a
 # consumer is not left inferring one from the other.
 # `comments_disabled` and `video_unavailable` are in this set, and they
@@ -749,8 +830,13 @@ def finish_run(rows: Sequence[Any], out_prefix: str, fmt: str,
     # failed, the run is not complete, whatever it stopped for.
     complete = stop_reason in COMPLETE_STOP_REASONS and not pages_failed
     row_cls = ROW_CLASS_BY_MODE.get(mode, Comment)
-    rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls)
+    write_stats: dict = {}
+    rc = save(rows, out_prefix, fmt, allow_empty=allow_empty, row_cls=row_cls,
+              stats=write_stats)
     wrote_output = bool(rows) or allow_empty
+    if write_stats:
+        # Under the caller's own keys: a caller-supplied value wins.
+        extra = {**write_stats, **(extra or {})}
 
     if wrote_output:
         status = "complete" if (rows and complete) else (

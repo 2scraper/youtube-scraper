@@ -8,7 +8,7 @@ comments are NOT in it at all — not as markup, not as JSON. The page ships
 a *continuation token* and the browser then asks for the comments over the
 site's own private API.
 
-So this repo follows CLAUDE.md §21: ask what the FRONT END calls before
+So this repo asks what the FRONT END calls before
 assuming a browser is needed. The answer is
 
     POST https://www.youtube.com/youtubei/v1/next
@@ -44,7 +44,7 @@ reports twenty comments with every column null. So `parse_comments` reads
 the mutations FIRST, indexes them by key, and walks the renderer tree only
 for the order, the pinned badge and the replies token.
 
-Two shapes, because the site serves both (CLAUDE.md §4)
+Two shapes, because the site serves both
 ======================================================
 The `WEB` client returns the entity form above. The `MWEB` client returns
 the LEGACY `commentRenderer` form — `contentText.runs`, `voteCount.runs`,
@@ -77,7 +77,7 @@ Both ARE exact on a VIDEO row, which is the asymmetry that makes
 `--mode video` worth having: `1,818,222,351 views`, `19,384,917` likes out
 of the like button's accessibility label, and `Oct 24, 2009`. Read the
 number BEFORE the count word there, never by stripping digits out of the
-label — CLAUDE.md §10 records a sibling repo shipping `445279961` on every
+label — a sibling repo shipped `445279961` on every
 row for exactly that reason.
 """
 
@@ -116,7 +116,7 @@ CLIENT_NAME = "WEB"
 CLIENT_ID = "1"
 
 # A FALLBACK only. The live version is read from `/sw.js_data` (2.8 KB)
-# once per run — see `client_version_from_text`. CLAUDE.md §8 says the user
+# once per run — see `client_version_from_text`. The user
 # agent comes from the browser rather than from a literal, and a client
 # version is the same kind of claim: a hardcoded one drifts away from what
 # the site is actually serving. This constant exists so a run still starts
@@ -132,7 +132,7 @@ _CLIENT_VERSION_RE = re.compile(r"\b(2\.\d{8}\.\d{2}\.\d{2})\b")
 # identical either way, so English costs nothing and buys a parseable
 # relative time and an ASCII count suffix. `--locale` overrides it, and
 # `parse_count` returns None rather than guessing when the suffix is not
-# one it knows (CLAUDE.md §8: never present a guess as a fact).
+# one it knows: never present a guess as a fact.
 DEFAULT_LOCALE = "en"
 DEFAULT_REGION = "US"
 
@@ -140,7 +140,7 @@ DEFAULT_REGION = "US"
 # `top` is YouTube's relevance ranking and is what the site selects; a run
 # under one sort and a run under the other are DIFFERENT SAMPLES of the
 # same video, not the same rows in a different order, so `sort` is a column
-# and `diff_runs.py` refuses to compare across it (CLAUDE.md §21).
+# and `diff_runs.py` refuses to compare across it.
 SORTS = ("top", "newest")
 DEFAULT_SORT = "top"
 _SORT_TITLE_PREFIX = {"top": "top", "newest": "new"}
@@ -152,7 +152,7 @@ REPLY_PAGE_SIZE = 10
 
 # The section identifier the site gives its own comment section. This is
 # the anchor for everything below: it is a stable, meaningful name the site
-# chose, not a build hash, which is CLAUDE.md §4's rule about anchoring on
+# chose, not a build hash, which is the rule about anchoring on
 # a contract rather than on a class.
 COMMENT_SECTION_ID = "comment-item-section"
 
@@ -205,7 +205,7 @@ def video_id_from_url(url: str) -> Optional[str]:
 def is_supported_url(url: str) -> Tuple[bool, str]:
     """(supported, reason). The reason is shown to the user, so it says WHY.
 
-    CLAUDE.md §5: refusing a host with a false reason sends the reader
+    Refusing a host with a false reason sends the reader
     hunting for a typo. A YouTube channel URL is a perfectly good YouTube
     URL that this tool cannot take, and saying "not a YouTube URL" would be
     a lie about it.
@@ -252,7 +252,7 @@ def comment_permalink(video_id: str, comment_id: str) -> str:
 # Building a request — pure data, so every engine can issue it its own way
 # ---------------------------------------------------------------------------
 #
-# CLAUDE.md §1: deliberately let no JavaScript cross this boundary. The
+# Deliberately, no JavaScript crosses this boundary. The
 # three browser engines each POST this by a different mechanism —
 # Playwright's APIRequestContext, a `fetch` inside the page for pyppeteer,
 # an async script for Selenium — and the HTTP path uses `requests`. All
@@ -272,8 +272,8 @@ def innertube_headers(client_version: str) -> Dict[str, str]:
 
     No API key. The `key=` query parameter every guide for this endpoint
     shows is not required — measured 2026-09-21, the endpoint answers 200
-    without it — and leaving it out is also the safer shape: CLAUDE.md §8
-    records that `requests` puts the full URL including its query string
+    without it — and leaving it out is also the safer shape:
+    `requests` puts the full URL including its query string
     into the text of every error it raises, so a key in a query parameter
     leaks the moment anything goes wrong.
     """
@@ -395,7 +395,7 @@ def parse_count(text: Optional[str]) -> Optional[int]:
     APPROXIMATE by construction: "318K" is anything from 317,500 to
     318,499, and the site publishes nothing better for a comment. The raw
     string is kept in its own column beside every number this produces, so
-    a consumer can always see what was actually said (CLAUDE.md §8).
+    a consumer can always see what was actually said.
 
     Grouping separators follow the family's price rules: a dot or comma
     with exactly three trailing digits is a thousands group, and the space
@@ -614,7 +614,7 @@ def _continuation_items(payload: Any) -> List[Any]:
     pages under `appendContinuationItemsAction`; both live in
     `onResponseReceivedEndpoints`. Walking the whole tree for
     `commentThreadRenderer` instead would also sweep up the threads quoted
-    inside unrelated panels, which is CLAUDE.md §4's tile-scoping rule in
+    inside unrelated panels, which is the tile-scoping rule in
     JSON form: stop at the container that covers exactly this page.
     """
     items: List[Any] = []
@@ -709,7 +709,7 @@ def total_comment_count(payload: Any) -> Optional[int]:
     the run sidecar so a consumer can see what fraction of the video a run
     holds — a 5-page run of a video with 2,457,619 comments is `complete`
     in the sense that every requested page was fetched, and is also a
-    0.004% sample. CLAUDE.md §21: "complete" and "exhaustive" are different
+    0.004% sample. "Complete" and "exhaustive" are different
     words, and a sidecar that says only the first is lying by omission.
     """
     for header in _walk(payload, "commentsHeaderRenderer"):
@@ -733,13 +733,13 @@ STATE_UNKNOWN = "unknown"
 # The site demands a signed-in account for a reason that is NOT a bot
 # challenge: an age-restricted, private or members-only video. A real
 # answer ABOUT THE VIDEO rather than about us, so it must never buy a
-# solve (CLAUDE.md §8: detected != blocking != paying) and must never
+# solve (detected != blocking != paying) and must never
 # rotate an exit, which cannot change how old the viewer is.
 STATE_AUTH_REQUIRED = "auth_required"
 
 # Markers for a refusal. Short, and deliberately so.
 #
-# CLAUDE.md §18 says to count every candidate on a page you know is good
+# Every candidate is counted on a page known to be good
 # before adding it, and doing that here killed most of the obvious list.
 # Counted 2026-09-21 across ten served captures and one served watch page:
 #
@@ -760,7 +760,7 @@ STATE_AUTH_REQUIRED = "auth_required"
 # the HTTP status. Neither of the two text markers has been OBSERVED from
 # here — 60 consecutive pages from this address drew no refusal at all — so
 # they are carried as documented-but-unverified and are marked as such
-# rather than described as measured (CLAUDE.md §19).
+# rather than described as measured.
 # Every marker here is written with an ASCII apostrophe and matched
 # against text that `_fold_apostrophes` has normalised, because YOUTUBE
 # DOES NOT USE ONE. Captured from `/player` for jNQXAC9IVRw on
@@ -771,7 +771,7 @@ STATE_AUTH_REQUIRED = "auth_required"
 # U+2019, and `json.dumps` with its default `ensure_ascii=True` then
 # turned it into the six characters `\u2019` in the text being searched
 # — so the shipped ASCII marker missed the real refusal twice over, and
-# the response fell through to `content`. This is CLAUDE.md §20's "a
+# the response fell through to `content`. This is the rule "a
 # marker must survive BOTH encodings of the same page", arriving through
 # a typographic apostrophe instead of an HTML entity.
 BOT_CHALLENGE_MARKERS = (
@@ -799,7 +799,7 @@ def detect_bot_challenge(text: Optional[str], status: Optional[int] = None
                          ) -> Optional[str]:
     """Name the refusal, or None. Status first, because it proves the most.
 
-    CLAUDE.md §17: order the signals by how much they prove, not by how
+    Order the signals by how much they prove, not by how
     cheap they are. A 429 IS the refusal; a text marker is a guess about
     wording that the site may change.
     """
@@ -825,7 +825,7 @@ def playability_refusal(payload: Any) -> Optional[str]:
 
     Structural, so it survives a reworded sentence and any locale — which
     a text marker does not, and the text marker above had already been
-    missing the real one. CLAUDE.md §17: order the signals by how much
+    missing the real one. Order the signals by how much
     they prove.
 
     Deliberately narrow, and `UNPLAYABLE` is deliberately absent. See
@@ -889,7 +889,7 @@ def detect_page_state(payload: Any, status: Optional[int] = None,
     # key first classified every watch payload as a continuation with no
     # comments in it — `empty` for a video with two million comments, and
     # `empty` rather than `comments_disabled` for a video whose comments
-    # really are off. CLAUDE.md §17: order the signals by how much they
+    # really are off. Order the signals by how much they
     # prove. `contents` + a comment section is what a watch response IS.
     section = comments_section(payload)
     if section is None and payload.get("onResponseReceivedEndpoints"):
@@ -909,7 +909,28 @@ def detect_page_state(payload: Any, status: Optional[int] = None,
 
 
 def _has_comments(payload: Any) -> bool:
-    return bool(_entity_index(payload)) or bool(_walk(payload, "commentRenderer"))
+    return (bool(_entity_index(payload)) or bool(_walk(payload, "commentRenderer"))
+            or bool(served_comment_items(payload)))
+
+
+# The continuation-item kinds that ARE comments, whatever the rows inside
+# them are later built from. Counted separately from the rows because the
+# two fail independently: when the entity payloads or `commentRenderer`
+# move, these items are still there, and a page that holds comment items
+# but parses to nothing is a parser failure — not the end of the listing.
+COMMENT_ITEM_KEYS = ("commentThreadRenderer", "commentViewModel",
+                     "commentRenderer")
+
+
+def served_comment_items(payload: Any) -> int:
+    """How many items in this continuation are comment threads or comments."""
+    count = 0
+    for item in _continuation_items(payload):
+        if isinstance(item, dict) and any(
+                key in COMMENT_ITEM_KEYS or key.startswith("commentThread")
+                for key in item):
+            count += 1
+    return count
 
 
 def disabled_reason(payload: Any) -> Optional[str]:
@@ -1041,7 +1062,7 @@ def mentions(entity: Dict[str, Any]) -> Optional[List[str]]:
 @dataclass
 class _EntityRow:
     """Intermediate shape. `Comment` itself lives in output_writer.py so the
-    family's row schema stays in one place (CLAUDE.md §9)."""
+    family's row schema stays in one place."""
 
 
 def parse_comments(payload: Any, *, video_id: Optional[str] = None,
@@ -1266,8 +1287,8 @@ def _parse_legacy_comments(payload, *, video_id, video_title, sort, page,
 def _exact_from_a11y(label: Optional[str]) -> Optional[int]:
     """"like this video along with 19,384,917 other people" -> 19384917.
 
-    Reads the NUMBER, not every digit in the string. CLAUDE.md §10 records
-    a sibling repo that shipped `445279961` on every row of every run by
+    Reads the NUMBER, not every digit in the string. A sibling repo
+    shipped `445279961` on every row of every run by
     stripping the digits out of a label holding both a rating and a count.
     """
     if not label:
@@ -1491,7 +1512,7 @@ def search_page_token(payload: Any) -> Optional[str]:
     """The next page of results, or None at the end.
 
     Search paginates by continuation only — there is no `?page=N` for it,
-    so CLAUDE.md §7's layer 2 does not apply and the chain has to be
+    so URL-planned pagination does not apply and the chain has to be
     followed one link at a time.
 
     It also needs its own reader rather than reusing `next_page_token`.
@@ -1500,7 +1521,7 @@ def search_page_token(payload: Any) -> Optional[str]:
     under `twoColumnSearchResultsRenderer/…/sectionListRenderer`. A run
     that looked only in the envelope stopped after page one and reported
     `pagination_exhausted` — a complete-looking run holding a fifth of what
-    was asked for, which is CLAUDE.md §7's silent-single-page bug wearing a
+    was asked for, which is the silent-single-page bug wearing a
     different endpoint.
 
     Searching the whole tree for a `continuationItemRenderer` is safe HERE

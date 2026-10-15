@@ -23,7 +23,7 @@ WHAT IS NOT VERBATIM, and why
 Everything that is a PERSON is rewritten before anything is written to
 disk. A comment capture is not like a product grid: it carries a real
 individual's display name, their channel id and URL, their avatar, and
-their own words. CLAUDE.md §10 is explicit that republishing those is a
+their own words. Republishing those is a
 separate act from the site showing them on its own page, and a sibling
 repo in this family committed exactly that before anyone noticed.
 
@@ -92,7 +92,7 @@ SOURCES = {
 # SERVED, fetched over the 2Captcha Scraping Browser, trimmed to the tags
 # that browser's auto-solve EXTENSION injected into it.
 #
-# It exists because CLAUDE.md §21 records a guard that passed for the
+# It exists because a sibling repo had a guard that passed for the
 # wrong reason: a marker check run only against captures taken with plain
 # curl, which carry no injection at all. Every fixture above was fetched
 # that way. This one is fetched the way a `--cdp-endpoint` run fetches,
@@ -213,7 +213,7 @@ def _avatar(_url) -> str:
 # channel that published the video, and scrubbing by shape renamed Rick
 # Astley out of the `search` fixture, which made a real value assertion
 # impossible to write. A publisher of a public video is not the private
-# individual CLAUDE.md §10 is about.
+# individual the scrub exists to protect.
 _PERSON_SUBTREES = ("commentEntityPayload", "commentSurfaceEntityPayload",
                     "commentRenderer", "commentViewModel",
                     "commentThreadRenderer")
@@ -366,7 +366,7 @@ def _trim(payload, keep: int):
     # The picker itself, not the composer around it. The composer carries
     # `disabledText` — "Comments are turned off." — which ships on EVERY
     # served first page and is the sharpest marker trap this site has
-    # (CLAUDE.md §18). The suite asserts that string is present here and
+    #. The suite asserts that string is present here and
     # is not in the marker set, so dropping the composer would quietly
     # retire the check that proves the trap is real.
     for key in ("emojiPickerRenderer", "emojiPickerUpsellRenderer",
@@ -384,7 +384,7 @@ def _trim(payload, keep: int):
     # Session material. `responseContext` carries `visitorData`, which is
     # the identifier the session that took this capture was using —
     # anonymous and long expired, and still not something to publish
-    # (CLAUDE.md §10). Nothing here reads it.
+    #. Nothing here reads it.
     context = data.get("responseContext")
     if isinstance(context, dict):
         for key in ("visitorData", "serviceTrackingParams",
@@ -491,7 +491,7 @@ def _sweep(fixture, anon: _Anonymiser):
 def _assert_clean(name, fixture, anon: _Anonymiser):
     """Prove no renamed value survived anywhere in the fixture.
 
-    CLAUDE.md §10 asks for a guard so the NEXT capture is scrubbed too.
+    A scrub needs a guard so the NEXT capture is scrubbed too.
     This is that guard at generation time; `smoke_test.py` carries the
     pattern-based half, which catches a value this table never knew about.
     """

@@ -3,12 +3,8 @@
 #
 # WHY THIS CANARY IS NOT GATED ON A SECRET
 # ----------------------------------------
-# CLAUDE.md §11 says a canary that cannot pass must SKIP rather than fail,
-# because a check that is always red teaches everyone to ignore checks. The
-# other half of that rule is §21's: a canary that CAN pass without a
-# credential should never be gated on one.
-#
-# This repo is the second case. Its central README claim is that YouTube's
+# A canary that CAN pass without a credential should never be gated on one.
+# Its central README claim is that YouTube's
 # comment endpoint answers a bare datacentre address with no key, no proxy
 # and no account — measured 2026-09-21 as 60 consecutive pages and 1,200
 # comments with no refusal. A GitHub runner is a bare datacentre address.
@@ -17,8 +13,10 @@
 # challenge, the badge goes red the next day and the claim is retested
 # without anyone having to remember to.
 #
-# The paid path is the one that skips: `scraper-api` needs TWOCAPTCHA_KEY
-# and says so with a ::notice:: when it is absent.
+# The paid path is the one that needs a secret: `scraper-api` needs
+# TWOCAPTCHA_KEY, and FAILS with an ::error:: naming it when it is absent.
+# A skipped step is not a tested path, and a green badge over it would say
+# the Scraper API path works when nothing checked it.
 name: canary
 
 on:
@@ -39,7 +37,7 @@ jobs:
   # It exists because v0.2.0's quick start was broken in exactly this way
   # and every other job installed Playwright, so nothing could see it: a
   # reader following the README met ModuleNotFoundError on their first
-  # command while the badges were green (CLAUDE.md §21, §23).
+  # command while the badges were green.
   core-only:
     name: the quick start, with only requirements.txt installed
     runs-on: ubuntu-latest
@@ -111,7 +109,7 @@ jobs:
       # >=3 pages, because with one page pagination is never exercised —
       # which is exactly how a silent single-page bug survived in a sibling
       # repo, reporting a complete-looking success holding a third of the
-      # data (CLAUDE.md §11).
+      # data.
       - name: Scrape three pages of comments
         id: run
         run: |
@@ -133,7 +131,8 @@ jobs:
                          3: "BLOCKED — the endpoint refused a datacentre "
                             "address, which is the README's central claim "
                             "failing",
-                         4: "no comments", 5: "remote API error",
+                         4: "no comments",
+                         5: "the content was never obtained",
                          6: "partial"}.get(code, "unknown")
               sys.exit(f"::error::exit {code} ({meaning})")
 
@@ -154,11 +153,23 @@ jobs:
           if len(rows) < 55:
               fail.append(f"{len(rows)} rows from 3 pages; expected ~60")
 
-          # Value floors, not coverage. A column can be 100% populated and
-          # entirely wrong (CLAUDE.md §10).
+          # Value floors, not coverage: a column can be 100% populated and
+          # entirely wrong.
+          #
+          # The text check tests the PARSER, not what people wrote. The site
+          # serves `content: ""` for some comments (on 2026-10-14, 4 of 60;
+          # most likely image-only, not proven), and a 95% non-empty floor over a
+          # live `top` ranking went red on that with the parser reading the
+          # site correctly. A parser that lost the field yields None on
+          # every row; one that reads it yields a string, empty or not.
+          text_read = sum(1 for r in rows if isinstance(r.get("text"), str))
+          if text_read < len(rows) * 0.95:
+              fail.append(f"the text field was read on only "
+                          f"{text_read}/{len(rows)} rows")
           with_text = sum(1 for r in rows if (r.get("text") or "").strip())
-          if with_text < len(rows) * 0.95:
-              fail.append(f"only {with_text}/{len(rows)} rows carry text")
+          if with_text < len(rows) * 0.5:
+              fail.append(f"only {with_text}/{len(rows)} rows carry any "
+                          f"text — far below what any page of comments holds")
           with_author = sum(1 for r in rows
                             if (r.get("author_name") or "").startswith("@"))
           if with_author < len(rows) * 0.95:
@@ -198,15 +209,57 @@ jobs:
                 f"account.")
           PY
 
+      # Checked, not just run: the second scrape must succeed and the two
+      # complete runs must be comparable. The CONTENT of the diff is not
+      # asserted — `top` is a live ranking and moves between two runs.
       - name: Diff two runs of the same ordering
         run: |
           set +e
           python playwright_scraper.py \
             --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
             --pages 3 --out canary_comments_b
+          code=$?
+          echo "second run exit: $code"
+          [ "$code" = "0" ] || { echo "::error::second run exit $code"; exit 1; }
           python diff_runs.py --old canary_comments.json \
                               --new canary_comments_b.json
-          echo "diff exit: $?"
+          code=$?
+          echo "diff exit: $code"
+          [ "$code" = "0" ] || { echo "::error::diff_runs exit $code"; exit 1; }
+
+      # Everything above reads over plain HTTPS (`--transport auto` never
+      # needed the browser), so without this step no browser engine is
+      # exercised live at all.
+      - name: The same scrape through a real browser
+        run: |
+          set +e
+          python playwright_scraper.py \
+            --url "https://www.youtube.com/watch?v=dQw4w9WgXcQ" \
+            --pages 2 --transport browser --out canary_browser
+          code=$?
+          echo "playwright --transport browser exit $code"
+          [ "$code" = "0" ] || { echo "::error::browser transport exit $code"; exit 1; }
+          python - <<'PY'
+          import json, sys
+          rows = json.load(open("canary_browser.json"))
+          meta = json.load(open("canary_browser.meta.json"))
+          fail = []
+          if "browser" not in meta.get("transports_used", []):
+              fail.append(f"transports_used is {meta.get('transports_used')}"
+                          f" — the browser was not the transport")
+          if meta["status"] != "complete":
+              fail.append(f"status is {meta['status']!r}")
+          if len(rows) < 35:
+              fail.append(f"{len(rows)} rows from 2 pages; expected ~40")
+          if sum(1 for r in rows if r.get("sku")) != len(rows):
+              fail.append("a row has no comment id")
+          if fail:
+              for line in fail:
+                  print(f"::error::{line}")
+              sys.exit(1)
+          print(f"::notice::browser transport: {len(rows)} rows, "
+                f"{meta['transports_used']}")
+          PY
 
       - name: The edge states still answer the way they are documented to
         run: |
@@ -233,6 +286,7 @@ jobs:
           path: |
             canary_comments*.json
             canary_comments*.csv
+            canary_browser*.json
 
   video:
     name: one video's metadata, including the exact upload date
@@ -292,11 +346,11 @@ jobs:
           path: canary_video*.json
 
   scraper-api:
-    name: the paid path (skips without a key)
+    name: the paid path (needs the TWOCAPTCHA_KEY secret)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # `secrets` is not available in a job-level `if`, so presence is tested
-    # through job `env` and read in each step's `if` (CLAUDE.md §11).
+    # through job `env`.
     env:
       HAVE_KEY: ${{ secrets.TWOCAPTCHA_KEY != '' }}
     steps:
@@ -304,23 +358,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - name: Say why this is skipped
+      # A missing secret FAILS this job. Skipping green would report the
+      # Scraper API path as checked when nothing reached the service.
+      - name: Require the secret this path needs
         if: env.HAVE_KEY != 'true'
         run: |
-          echo "::notice::TWOCAPTCHA_KEY is not set, so the Scraper API path "\
-               "is skipped. Nothing else in this workflow needs it: the "\
-               "comment endpoint this repo reads is ungated."
+          echo "::error::TWOCAPTCHA_KEY secret is not set, so the Scraper API path was NOT tested. Add it under Settings > Secrets and variables > Actions. The free comment path is tested by the other jobs."
+          exit 1
       - name: Install the core
-        if: env.HAVE_KEY == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Read a video through the Scraper API
-        if: env.HAVE_KEY == 'true'
         env:
           # Through the ENVIRONMENT, never a command line: env_config.py
           # already reads exactly this name, and an unset secret arrives as
-          # an empty string which the loader treats as unset (CLAUDE.md §11).
+          # an empty string which the loader treats as unset.
           TWOCAPTCHA_KEY: ${{ secrets.TWOCAPTCHA_KEY }}
         run: |
           set +e

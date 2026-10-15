@@ -3,7 +3,7 @@
 
 The pyppeteer twin of `playwright_scraper.py`. Everything from
 `_prime_session` downwards is byte-identical to that file on purpose:
-CLAUDE.md §6 requires all three engines to agree on exit codes, run status,
+all three engines must agree on exit codes, run status,
 and whether a run crashes or spends money, and the only way to keep that
 true is for the shared half to BE the same text. What differs is confined
 to the driver layer below — the imports, `_BrowserSession`, the two launch
@@ -20,12 +20,12 @@ discovered:
   InnerTube call is made by a `fetch` INSIDE the page, which shares them
   for the same reason — it runs on the site's own origin. That JavaScript
   lives in this file and never crosses into a shared module, because the
-  three drivers spell it three ways (CLAUDE.md §1).
+  three drivers spell it three ways.
 * **pyppeteer cannot authenticate a proxy on the command line.** The
   credentials are stripped out of `--proxy-server` and applied through
   `page.authenticate`, which is the only place they belong: a
   `--proxy-server=user:pass@host` is part of the browser's argv and
-  readable by anything that can run `ps` (CLAUDE.md §8).
+  readable by anything that can run `ps`.
 
 pyppeteer is effectively unmaintained and its own README points at
 Playwright. It is kept for parity, and it is demoted in priority rather
@@ -38,7 +38,7 @@ session object. Measured on 2026-09-25, before the split: 24 of the
 29 definitions the three engines shared were byte-identical.
 
 The driver library is imported at MODULE level on purpose
-(CLAUDE.md §10): the suite's skip and CI's `python -c "import
+: the suite's skip and CI's `python -c "import
 puppeteer_scraper"` both depend on this module failing to import when
 pyppeteer is absent.
 """
@@ -204,7 +204,7 @@ class _Loop:
 class _BrowserSession:
     """A browser, a page on youtube.com, and a fetch primitive bound to it.
 
-    A rotation is a FRESH BROWSER (CLAUDE.md §8): cookies a bot manager
+    A rotation is a FRESH BROWSER: cookies a bot manager
     issued against exit A and replayed from exit B are a stronger signal
     than either address alone. So this object is torn down and rebuilt
     rather than having its proxy swapped underneath it.
@@ -343,7 +343,7 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
         host_only, username, password = split_credentials(proxy_url)
         # Credentials NEVER go into argv — `--proxy-server=` becomes part
         # of the browser's command line, readable by anything that can run
-        # `ps` and kept in shell history (CLAUDE.md §8). The host and port
+        # `ps` and kept in shell history. The host and port
         # stay, because which exit a run used is the point of the log and
         # is not the secret.
         launch_args.append(f"--proxy-server={host_only}")
@@ -379,7 +379,7 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
 def _apply_fingerprint(loop, page, fingerprint, user_agent) -> None:
     """Give the identity everything the fingerprint states, not just a UA.
 
-    CLAUDE.md §24 measured a BARE user-agent override being served on the
+    A BARE user-agent override was measured on a sibling site being served on the
     first navigation and refused on the next three, while a complete
     identity was served throughout. `page.setUserAgent` on its own is that
     bare override: it changes `navigator.userAgent` and leaves
@@ -404,7 +404,7 @@ def _apply_fingerprint(loop, page, fingerprint, user_agent) -> None:
     # Measured 2026-09-21 rather than reasoned about: a run reported the
     # fingerprint applied while the page returned `deviceMemory` 8 against
     # the fingerprint's 32, `hardwareConcurrency` 4 against 32, and the
-    # real SwiftShader renderer string. CLAUDE.md §1 names this exact
+    # real SwiftShader renderer string. This is the exact
     # hazard — the drivers disagree about what a snippet IS — which is why
     # the shared module emits source and each engine installs it its own
     # way.
@@ -440,7 +440,7 @@ def _apply_fingerprint(loop, page, fingerprint, user_agent) -> None:
     if not metadata:
         logger.warning("The fingerprint carried no brand list, so its client "
                        "hints are left alone: a HALF identity is worse than "
-                       "none (CLAUDE.md §24).")
+                       "none.")
         return
     payload = {"userAgent": user_agent, "userAgentMetadata": metadata}
     language = accept_language(fingerprint)
@@ -472,7 +472,7 @@ def _connect_remote(pw, args) -> _BrowserSession:
 
     Never sets a user agent, a fingerprint or a proxy on top: the remote
     browser brings its own, and stacking a second creates a contradiction
-    rather than better cover (CLAUDE.md §8). Unlike chromedriver, pyppeteer
+    rather than better cover. Unlike chromedriver, pyppeteer
     takes a full `ws://user:pass@host:port` and authenticates on the
     WebSocket upgrade, so an authenticated endpoint works here.
     """
@@ -494,7 +494,7 @@ def _connect_remote(pw, args) -> _BrowserSession:
             # loop's handler caught. Preferring it turns "did not return
             # within 30s" into "server rejected WebSocket connection: HTTP
             # 500", which is the difference between checking your network
-            # and reading CLAUDE.md §20.
+            # and checking the service's status.
             reason = _mask_credentials(_Loop.last_error or exc)
             if attempt >= attempts or "profile_locked" in reason:
                 loop.close()
@@ -523,7 +523,7 @@ class _Driver(run_core.Driver):
         """A FRESH driver, because a worker gets its own.
 
         Playwright's sync API ties a browser to the thread that
-        created it (CLAUDE.md §7), so the worker loop opens one of
+        created it, so the worker loop opens one of
         these per thread. Returning `self` would have the workers
         overwrite each other's handle — and it would have looked
         correct on a single-worker run.

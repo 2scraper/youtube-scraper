@@ -12,7 +12,7 @@ Every other repo in this family drives a browser to RENDER a page and then
 parses the markup. That is impossible here and also unnecessary: YouTube
 puts no comments in the document at all, and the endpoint its own front end
 calls answers a bare HTTP POST with no key, no cookies and no browser
-(CLAUDE.md §21, and see `product_parser`'s docstring for the measurements).
+(see `product_parser`'s docstring for the measurements).
 
 So the browser has one job: be a real session on the site's origin. This
 engine opens the watch page — which sets the visitor cookies, runs the
@@ -22,8 +22,8 @@ those cookies, that proxy and that user agent.
 
 That is deliberate rather than incidental. `context.request.post` is a
 protocol call, not an evaluated string, so it works under YouTube's
-Content-Security-Policy, which has no `unsafe-eval`; CLAUDE.md §18 records
-a sibling repo whose readiness wait died with `EvalError` on exactly that.
+Content-Security-Policy, which has no `unsafe-eval`; a sibling repo's
+readiness wait died with `EvalError` on exactly that.
 
 The three modes
 ===============
@@ -42,7 +42,7 @@ In `--mode comments` one "page" is one continuation — 20 top-level
 comments, or 10 replies. `--pages 3` is therefore 60 comments, not three
 screens of anything, and the run's closing line says what fraction of the
 video that was. On a video with two and a half million comments it is not a
-large fraction, and saying so is the point (CLAUDE.md §21).
+large fraction, and saying so is the point.
 
 The run itself lives in `run_core.py` and is shared with the other
 two engines and with `youtube_scraper.py`. What stays here is what
@@ -51,7 +51,7 @@ session object. Measured on 2026-09-25, before the split: 24 of the
 29 definitions the three engines shared were byte-identical.
 
 The driver library is imported at MODULE level on purpose
-(CLAUDE.md §10): the suite's skip and CI's `python -c "import
+: the suite's skip and CI's `python -c "import
 playwright_scraper"` both depend on this module failing to import when
 Playwright is absent.
 """
@@ -92,7 +92,7 @@ NAVIGATION_TIMEOUT_MS = 60_000
 class _BrowserSession:
     """A browser, a context on youtube.com, and the request API bound to it.
 
-    A rotation is a FRESH BROWSER (CLAUDE.md §8): cookies a bot manager
+    A rotation is a FRESH BROWSER: cookies a bot manager
     issued against exit A and replayed from exit B are a stronger signal
     than either address alone. So this object is torn down and rebuilt
     rather than having its proxy swapped underneath it.
@@ -175,7 +175,7 @@ class _BrowserSession:
         A function object, never an evaluated string: YouTube's
         Content-Security-Policy has no `unsafe-eval`, and a string-eval
         wait is what killed a sibling repo's run with `EvalError`
-        (CLAUDE.md §18). Playwright routes this through
+. Playwright routes this through
         `Runtime.callFunctionOn`, which works under any CSP.
         """
         try:
@@ -218,7 +218,7 @@ def _launch_local(pw, args, pool: Optional[ProxyPool]) -> _BrowserSession:
     if proxy_conf:
         # Credentials go through Playwright's own fields, never onto the
         # command line: `--proxy-server=` becomes part of the browser's
-        # argv, readable by anything that can run `ps` (CLAUDE.md §8).
+        # argv, readable by anything that can run `ps`.
         launch_kwargs["proxy"] = proxy_conf
     browser = pw.chromium.launch(**launch_kwargs)
 
@@ -265,8 +265,8 @@ def _apply_fingerprint(context, page, fingerprint, user_agent) -> None:
     `navigator.userAgentData` reporting the REAL browser. Measured
     2026-09-21 by reading both back out of a live page: the UA said
     `Chrome/150` while the brands said `HeadlessChrome/153`. That is a
-    contradiction rather than cover, and it is the half-identity CLAUDE.md
-    §24 measured being refused where a complete one was served.
+    contradiction rather than cover, and a half identity like that was
+    measured on a sibling site being refused where a complete one was served.
 
     Applied TOGETHER with the user agent and never alone, for the same
     reason: a bare override is the thing that failed there.
@@ -287,7 +287,7 @@ def _apply_fingerprint(context, page, fingerprint, user_agent) -> None:
     if not metadata:
         logger.warning("The fingerprint carried no brand list, so its client "
                        "hints are left alone: a HALF identity is worse than "
-                       "none (CLAUDE.md §24).")
+                       "none.")
         return
     payload = {"userAgent": user_agent, "userAgentMetadata": metadata}
     language = accept_language(fingerprint)
@@ -305,7 +305,7 @@ def _apply_fingerprint(context, page, fingerprint, user_agent) -> None:
         # reported `HeadlessChrome/153` in the brands while one that kept
         # the session reported the fingerprint's `Google Chrome/150`. The
         # call succeeded either way, so this failed silently in exactly the
-        # way CLAUDE.md §16 describes — the tool doing less than it says
+        # way that matters most — the tool doing less than it says
         # while reporting success. The session is parked on the page so it
         # lives as long as the browser does.
         page._2captcha_cdp_session = session
@@ -320,7 +320,7 @@ def _connect_remote(pw, args) -> _BrowserSession:
 
     Never sets a user agent, a fingerprint or a proxy on top: the remote
     browser brings its own, and stacking a second creates a contradiction
-    rather than better cover (CLAUDE.md §8). The engine refuses those
+    rather than better cover. The engine refuses those
     combinations in `parse_args` rather than quietly dropping them.
     """
     # The upgrade is RETRIED, because a rejection here is usually the
@@ -328,11 +328,11 @@ def _connect_remote(pw, args) -> _BrowserSession:
     # Scraping Browser endpoint: three raw WebSocket upgrades seconds
     # apart gave `HTTP 500` instantly on the first and connected on the
     # other two. Un-retried, that is exit 5 on roughly a third of runs for
-    # a condition that clears by itself — and CLAUDE.md §20 names it: a
+    # a condition that clears by itself. A
     # managed browser answering 500 on the upgrade is the SERVICE failing
     # to raise its own exit, not this code.
     #
-    # Deliberately NOT the same thing as a dead proxy (§8). There is no
+    # Deliberately NOT the same thing as a dead proxy. There is no
     # other exit to move to here, so the right response is to ask the same
     # endpoint again after a moment rather than to rotate.
     browser = None
@@ -372,7 +372,7 @@ class _Driver(run_core.Driver):
         """A FRESH driver, because a worker gets its own.
 
         Playwright's sync API ties a browser to the thread that
-        created it (CLAUDE.md §7), so the worker loop opens one of
+        created it, so the worker loop opens one of
         these per thread. Returning `self` would have the workers
         overwrite each other's handle — and it would have looked
         correct on a single-worker run.

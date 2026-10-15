@@ -5,31 +5,30 @@ diff_runs.py
 Compares two output files from this project (JSON, as written by
 output_writer.save) and reports what changed between them, keyed on `sku`.
 
-    python3 diff_runs.py --old restaurants.2026-09-01.json \\
-                          --new restaurants.2026-09-07.json
+    python3 diff_runs.py --old comments.2026-09-01.json \\
+                          --new comments.2026-09-07.json
 
 Typical use is a scheduled re-run kept under a dated filename, diffed against
 the previous one:
 
-    python3 playwright_scraper.py --text restaurants --location "New York, NY" \\
-        --out "restaurants_$(date +%F)"
-    python3 diff_runs.py --old "restaurants_$(ls -t restaurants_*.json | sed -n 2p)" \\
-                          --new "restaurants_$(date +%F).json" --out diff.json
+    python3 youtube_scraper.py --url dQw4w9WgXcQ --pages 5 \\
+        --out "comments_$(date +%F)"
+    python3 diff_runs.py --old "$(ls -t comments_*.json | grep -v meta | sed -n 2p)" \\
+                          --new "comments_$(date +%F).json" --out diff.json
 
 Four buckets, each keyed on sku:
 
   added          — sku present in --new, absent from --old
-  removed        — sku present in --old, absent from --new: the listing was
-                   filled or withdrawn, or simply fell outside the pages this
-                   run fetched
-  changed        — sku present in both, with a different title, rate range,
-                   pay period, commitment, work arrangement, location, or
-                   slot count. See TRACKED_FIELDS.
-  source_changed — sku present in both, but one row came from the INDEX
-                   (`explore`) and the other from a DETAIL page (`detail`),
-                   and they differ on a column only one of the two fills.
+  removed        — sku present in --old, absent from --new: the comment was
+                   deleted, or (far more often) fell outside the pages this
+                   run fetched — see below
+  changed        — sku present in both, with different text, engagement,
+                   badges or video metadata. See TRACKED_FIELDS.
+  source_changed — sku present in both, but one row was read with the
+                   `/player` call answered and the other without it, and
+                   they differ on a column only the player call fills.
                    Reported separately because this says something about our
-                   own two snapshots rather than about the listing — and
+                   own two snapshots rather than about the video — and
                    --fail-on-change deliberately ignores it.
 
 TWO THINGS TO KNOW BEFORE READING A DIFF OF THIS SITE
@@ -93,7 +92,7 @@ from output_writer import UNIQUE_BY_SKU_MODES
 #
 # A shop's fields are absent because a comment has no price, stock or
 # discount — porting them would be dead code that looks load-bearing
-# (CLAUDE.md §4). What changes on a comment is its TEXT (it was edited),
+#. What changes on a comment is its TEXT (it was edited),
 # its ENGAGEMENT, and the badges the creator controls.
 #
 # DELIBERATELY NOT TRACKED, and each is a measurement rather than an
@@ -151,35 +150,22 @@ TRACKED_FIELDS = (
     "category",
 )
 
-# The subset that only ONE of the two sources populates.
-#
-# The split runs both ways on this site, which is why it is worth stating.
-# A landing row (`apollo`) has the equity range, the company's badges, size
-# and tagline, and no salary period. A job-page row (`jsonld`) has the
-# period, the benefits and the industry, and no equity at all — schema.org
-# has no expression for it. So diffing a landing run against a job run would
-# report each of these as a change on every row, and none of it would be
-# about the job. When the two rows disagree on `data_source`, they are
-# reported as `source_changed` rather than as changes (§8: a difference that
-# comes with a provenance difference says something about our own two
-# snapshots, not about the site).
 # The columns that exist only when the SECOND call answered. On this site
 # `data_source` is `innertube.watch` or `innertube.watch+player`, and these
-# four are exactly what the two differ by.
+# four are exactly what the two differ by. When the two rows disagree on
+# `data_source`, a difference in these is reported as `source_changed`
+# rather than as a change: a difference that comes with a provenance
+# difference says something about our own two snapshots, not about the site.
 #
-# This tuple arrived from a donor repo listing a job board's columns —
-# `salary_period`, `equity_min`, `company_badges` and six more, not one of
-# which exists on `Comment` or on `Video`. So the mechanism below was
-# live, correct and unreachable: nothing could ever match it, which is
-# CLAUDE.md §17's "a policy constant nothing reads" wearing the shape of a
-# working feature.
+# An earlier version of this tuple named columns that exist on neither
+# `Comment` nor `Video`, so the mechanism below was live, correct and
+# unreachable — a policy constant nothing could ever match.
 #
 # It was not merely dead. `duration_seconds` and `category` ARE in
 # TRACKED_FIELDS, so two runs of the same video — one that reached
 # `/player` and one that met a bot challenge on it — diffed as "the
 # category changed" and "the duration changed" on every row. That is a
-# claim about YouTube made from a fact about our own two snapshots, which
-# is the exact false alarm §8 wrote this branch to prevent.
+# claim about YouTube made from a fact about our own two snapshots.
 DETAIL_ONLY_FIELDS = (
     "published_at", "duration_seconds", "category", "keywords",
 )
@@ -201,8 +187,8 @@ def _by_sku(products: List[dict]) -> Tuple[Dict[str, dict], int]:
         if sku is None:
             unmatchable += 1
             continue
-        # A run's own output can already hold a duplicate sku (two rows in the
-        # same category, or a rerun of dedupe_by_sku's job on older output
+        # A run's own output can already hold a duplicate sku (a comment a
+        # live `top` ranking served twice, or output
         # written before it existed) — keep the first and count the rest as
         # unmatchable rather than letting one clobber the other silently.
         if sku in indexed:
@@ -231,9 +217,9 @@ def diff_products(old: List[dict], new: List[dict]) -> dict:
             continue
 
         # A row whose `data_source` differs between runs is not comparable on
-        # the profile-only columns: a listing row leaves them null and a
-        # profile row fills them, so every one of them would read as a change
-        # and none of it would be about the business. Reporting it as a
+        # the player-only columns: a row without `/player` leaves them null
+        # and a row with it fills them, so every one of them would read as a
+        # change and none of it would be about the video. Reporting it as a
         # change would be a false alarm about the site; the other columns
         # still compare fine.
         sources = (before.get("data_source"), after.get("data_source"))
@@ -271,12 +257,10 @@ def _print_summary(result: dict) -> None:
           f"{len(result['source_changed'])} not comparable across run kinds.")
     for p in result["added"]:
         print(f"  + {p.get('sku')}  {p.get('title')}  "
-              f"@ {p.get('company_name') or '?'}  "
-              f"{p.get('compensation') or 'pay not stated'}")
+              f"by {p.get('author_name') or p.get('channel_name') or '?'}")
     for p in result["removed"]:
         print(f"  - {p.get('sku')}  {p.get('title')}  "
-              f"@ {p.get('company_name') or '?'}  "
-              f"{p.get('compensation') or 'pay not stated'}")
+              f"by {p.get('author_name') or p.get('channel_name') or '?'}")
     for c in result["changed"]:
         deltas = ", ".join(f"{f}: {v['old']!r} -> {v['new']!r}"
                            for f, v in c["changes"].items())
@@ -286,9 +270,9 @@ def _print_summary(result: dict) -> None:
         deltas = ", ".join(f"{f}: {v['old']!r} -> {v['new']!r}"
                            for f, v in c["changes"].items())
         print(f"  ? {c['sku']}  {c['title']}  {deltas}  "
-              f"[data_source {src['old']!r} -> {src['new']!r}: a listing row "
-              f"leaves these columns null and a profile row fills them, so "
-              f"this is not a change in the business]")
+              f"[data_source {src['old']!r} -> {src['new']!r}: only one of "
+              f"the two rows had the /player call's columns, so this is not "
+              f"a change in the video]")
     unmatchable = result["unmatchable_old"] + result["unmatchable_new"]
     if unmatchable:
         print(f"[!] {unmatchable} row(s) across both files had no sku or a "
@@ -339,7 +323,7 @@ def _check_comparable(args) -> bool:
             # one that does not is caught rather than discovered.
             problems.append(
                 f"{label} ({path}) is a {mode!r} run, which is not one row "
-                f"per sku. This tool diffs one row per sku on price, so there "
+                f"per sku. This tool diffs one row per sku, so there "
                 f"is nothing here it can compare.")
         if status != "complete":
             problems.append(
@@ -348,11 +332,11 @@ def _check_comparable(args) -> bool:
                 f"page(s), reason {meta.get('stop_reason')!r}")
     if len(set(modes.values())) > 1:
         kinds = set(modes.values())
-        # `careers` against either marketplace mode is the severe case and
+        # `comments` against either video mode is the severe case and
         # deserves its own sentence: the two share NO ids at all, so every
-        # row would be reported as both added and removed. `listings`
-        # against `job` is milder — same id space, different columns — but
-        # still describes the mode change rather than the catalogue.
+        # row would be reported as both added and removed. `video` against
+        # `search` is milder — same id space, different columns — but
+        # still describes the mode change rather than the site.
         if "comments" in kinds and kinds - {"comments"}:
             problems.append(
                 f"the two runs are different POPULATIONS ({modes}). A "
@@ -419,7 +403,7 @@ def _check_comparable(args) -> bool:
                   + (f" ({share}%)" if share else "") + " — a complete run, "
                   f"and a sample. A `removed` line may mean the sample "
                   f"moved rather than that a comment was deleted, "
-                  f"{why}. CLAUDE.md §21: complete and exhaustive are "
+                  f"{why}. Complete and exhaustive are "
                   f"different words.")
         if meta.get("replies") is False and meta.get("mode") == "comments":
             print(f"[i] {label} ({path}) did not expand replies, so it "
@@ -479,10 +463,10 @@ def main() -> int:
             json.dump(result, f, ensure_ascii=False, indent=2)
         print(f"[+] Full diff written to {args.out}")
 
-    # `source_changed` is not a reason to fail: it means one row came from a
-    # listing run and the other from a profile run, so the columns only a
-    # profile fills differ. That says something about our own two snapshots
-    # rather than about the business, and alerting on it would train whoever
+    # `source_changed` is not a reason to fail: it means one row was read
+    # with the /player call answered and the other without it, so the
+    # columns only that call fills differ. That says something about our own
+    # two snapshots rather than about the video, and alerting on it would train whoever
     # reads the alert to ignore it.
     if args.fail_on_change and (result["added"] or result["removed"] or result["changed"]):
         return 1
