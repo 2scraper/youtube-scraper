@@ -11,7 +11,63 @@ rather than leaving it to be discovered from a bill or a chart.
 
 ## [Unreleased]
 
+> **Output files now honour your umask.** Every `<out>.json`, `<out>.csv`
+> and `<out>.meta.json` used to be written `0600` whatever the umask said.
+> A new file now gets `0o666 & ~umask` (`0644` under umask `022`), and a
+> file being replaced keeps its own mode, including under `--format both`.
+
+> **CSV cells that a spreadsheet would run as a formula are prefixed with
+> `'`.** Any string cell starting with `=`, `+`, `-`, `@`, a tab, CR or LF
+> — including every `author_name`, which is an `@handle` on this site. CSV
+> only: numbers and the JSON output are unchanged. The sidecar records the
+> count as `csv_cells_escaped`.
+
+> **A comment page that was served but parses to nothing is now a parser
+> failure.** If YouTube moves the comment payload, a first page that used to
+> exit `4` ("no comments") on a video stating millions now exits `5` with
+> `stop_reason: parse_error`, and a later page that used to end a run as
+> `complete` (exit `0`) now makes it `partial` (exit `6`). A search page that
+> still offers a next page but yields no videos is treated the same way, and
+> a reply thread whose page parses to nothing counts as a failed thread.
+
+> **Negative or zero counts are refused before anything runs**, with exit
+> `2` naming the flag: `--pages` and `--reply-pages` and `--concurrency`
+> below 1, and `--retries`, `--proxy-block-retries`, `--delay` and
+> `--retry-delay` below 0. A negative `--delay` used to fetch page 1 and
+> then crash with the rows lost.
+
+> **`--mode search` no longer reads its query from `YOUTUBE_URL`**, and
+> `.env.example` ships `YOUTUBE_URL` commented out. A copied example used
+> to turn a search into a search for a video URL.
+
+> **`youtube_scraper.py --transport browser` (or `--cdp-endpoint`) with the
+> chosen engine's library not installed exits `2`**, a usage error, instead
+> of `1`.
+
 ### Fixed
+- **The credential scan skipped every file when the clone sat under a
+  directory named `build`, `venv` or `env`**, because its exclusions were
+  tested against the absolute path. They are now tested against the path
+  inside the repository, a scan that reads zero files fails, and `.env.*`
+  copies (except `.env` itself), `.bak`, `.log` and `.html` files are read.
+- **`.gitignore` covers saved pages and per-page payloads by kind**
+  (`*.html`, `*.page[0-9]*`), not only by the names the engines use today.
+- **The contributor guide, security policy and issue templates described
+  other sites.** They now describe this repository; security reports are
+  asked to use the subject "youtube-scraper security".
+- **The README's `diff_runs.py` example did not run**: it now passes
+  `--old` and `--new`.
+- **Exit 5 is described as "the content was never obtained"** in
+  `TROUBLESHOOTING.md` and the canary, matching the README; the
+  troubleshooting guide no longer lists a served page that parsed to
+  nothing under exit 4.
+- **A dead proxy with no pool no longer logs that it is rotating.**
+- **The claim that a Scraping Browser endpoint's credentials last "about a
+  day" is removed** from `.env.example` and `TROUBLESHOOTING.md`; this
+  repository does not document their lifetime.
+- **Comments no longer cite the maintainers' internal instruction files**
+  by name or section number; each rule is stated in place. A suite check
+  fails if such a citation is added again.
 - **The Scraper API engine failed on every `--wait-text` / `--wait-element` /
   `--wait-state` call, and was billed for it.** It sent `waitFor` as a
   JSON-encoded string; measured 2026-09-23 the live API answers that with
@@ -30,6 +86,17 @@ rather than leaving it to be discovered from a bill or a chart.
   object-shaped `waitFor`). The choice is removed, and the module docstring
   and README note that their 2026-09-21 `networkidle` row was taken with the
   string form the API accepted then and cannot be reproduced today.
+
+### Changed
+- **The canary now requires every path it runs to reach the site.** The
+  Scraper API job fails with an error naming `TWOCAPTCHA_KEY` when that
+  secret is missing instead of skipping green; the two-run diff step checks
+  both exit codes; a two-page scrape through `--transport browser` checks
+  that a real browser engine still works live; and the comment-text floor
+  checks that the parser read the field, rather than that 95% of a live
+  ranking's comments contain text (on 2026-10-14 the site served four of
+  sixty comments with empty text and turned it red with the parser
+  correct).
 
 ## [0.3.0] — 2026-09-25
 
@@ -191,8 +258,8 @@ class — no test failed, no run crashed, and the output looked right.
   renamed over the destination — so a reader sees the whole previous file
   or the whole new one.
 - **The cross-engine surface check never ran.** It compared engines that
-  IMPORTED, and a supported virtualenv holds exactly one (§6 says install
-  one), so it compared one engine against nothing and reported itself
+  IMPORTED, and a supported virtualenv holds exactly one (the install
+  instructions say install one), so it compared one engine against nothing and reported itself
   passed — 0 pairs, suite green. The audit found real divergence only by
   installing all three, a configuration the README tells people not to
   create. The comparison now reads the source, so it runs everywhere

@@ -19,8 +19,7 @@ watch page at 1.36 MB, and 60 consecutive InnerTube pages returning 1,200
 comments with no refusal of any kind. No challenge has ever been rendered
 to this scraper.
 
-But "no challenge rendered" is NOT "no captcha configured" (CLAUDE.md
-§18), so the served watch page was grepped for the site's own captcha
+But "no challenge rendered" is NOT "no captcha configured", so the served watch page was grepped for the site's own captcha
 configuration the way that section says to. The answer is unusual enough
 to be worth the paragraph, because two of the three obvious greps LIE:
 
@@ -59,7 +58,7 @@ What is NOT true, and must never be written, is that a captcha here
 (`TurnstileTaskProxyless`), enterprise reCAPTCHA
 (`RecaptchaV2EnterpriseTaskProxyless`) and ordinary v2/v3, and this module
 builds all of them. The only sentence this repo is entitled to is which
-task types it implements and what it has actually met (CLAUDE.md §19).
+task types it implements and what it has actually met.
 
 PROVENANCE OF THE FIGURES BELOW
 -------------------------------
@@ -89,12 +88,10 @@ Two things decide whether that money buys anything anywhere:
     at all, so a frame present settles it as a v2 checkbox.
 
 Detection therefore stays BROAD while spending stays NARROW:
-`--solve-captcha when-blocked` is the default and counts job links before
-paying, `page_flow.SOLVES_PER_PAGE` caps a page at one purchase, and
+`--solve-captcha when-blocked` is the default and checks whether the content
+has already arrived before paying, `page_flow.SOLVES_PER_PAGE` caps a page at one purchase, and
 `page_flow.STATE_POLICY` — not this file — decides which state is worth
 money at all.
-
-There is deliberately no DataDome path here. See "No DataDome solver" below.
 
 Flow:
   1. Both detectors run and are reconciled (see reconcile_detections) to
@@ -1173,21 +1170,14 @@ solve_recaptcha_v3 = solve_recaptcha
 # ===========================================================================
 # What is deliberately NOT here
 # ===========================================================================
-# The sibling repo in this family carries a whole second solver for its
-# site's OWN first-party image captcha ("Enter the characters you see below",
-# a JPEG of distorted text and a GET form). Roughly 190 lines of it, and none
-# of it is ported here, because this site has no such page.
+# A sibling repo in this family (amazon-scraper) carries a whole second
+# solver for its site's OWN first-party image captcha ("Enter the characters
+# you see below", a JPEG of distorted text and a GET form). None of it is
+# ported here, because this site has no such page.
 #
-# What this site does instead is refuse a HEADLESS browser. Measured
-# 2026-09-10 from five different addresses, four of them residential: Akamai
-# answers with HTTP 403 and a 394-byte "Access Denied" page carrying a
-# reference id — no form, no image, no widget, nothing for a solver to
-# answer. And the trigger is the CLIENT rather than the address: the very
-# same addresses were served HTTP 200 and the full catalogue by a browser
-# with a real window. So the response to a block here is `--headful` or
-# `--cdp-endpoint`, not a solve and not a better proxy, and
-# product_parser.detect_page_state reports it as "blocked" rather than
-# "challenge" precisely so no solve is attempted and nothing is charged.
+# This site has in fact never been observed to refuse at all: 60 consecutive
+# InnerTube pages from a bare datacentre address drew no challenge on
+# 2026-09-21 (see the README).
 #
 # The reCAPTCHA / hCaptcha / Turnstile machinery above IS kept, and that is a
 # deliberate asymmetry rather than an inconsistency. Detection stays broad
@@ -1195,6 +1185,6 @@ solve_recaptcha_v3 = solve_recaptcha
 # what the address has been doing — a narrow list is how a challenge gets
 # reported as an empty page months later. A solver for a challenge this site
 # has never been observed to serve is dead code; a DETECTOR for one is cheap
-# insurance: a detection that fires on a page whose lots have
-# already rendered guards nothing, which is why the default is
-# `when-blocked` and why it counts lot links before it spends.
+# insurance: a detection that fires on a page whose content has
+# already arrived guards nothing, which is why the default is
+# `when-blocked` and why it checks for that content before it spends.

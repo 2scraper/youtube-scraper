@@ -86,7 +86,7 @@ CREDENTIAL_ALLOWED = (
 HEX32 = re.compile(r"\b[0-9a-f]{32}\b")
 # Contexts in which a 32-hex string is plainly not a key. Site-specific
 # entries belong here only once a committed fixture actually carries one —
-# CLAUDE.md §16: a family-wide entry copied without checking is how dead
+# a family-wide entry copied without checking is how dead
 # code spreads. Kept as a CONTEXT allowlist rather than by loosening the
 # pattern: a bare 32-hex string anywhere else still fails, which is the
 # point of the check.
@@ -104,9 +104,25 @@ HEX32_ALLOWED = ("sha", "hash", "nonce", "example", "md5", "digest",
 # Added with NO allowlist, which is the point: the real fixtures and sample
 # contain zero 32-hex strings and zero credentialled URLs, so the strictest
 # rule covers the largest files rather than acquiring an exception that a
-# real key could later hide behind (CLAUDE.md §24).
+# real key could later hide behind.
 SCANNED_SUFFIXES = (".py", ".md", ".txt", ".yml", ".yaml", ".example",
-                    ".json", ".csv")
+                    ".json", ".csv", ".toml", ".sh", ".cfg", ".ini",
+                    ".html", ".log", ".bak")
+# Files read whatever their suffix: the Dockerfile, and every dotenv-style
+# name except `.env` itself. `.env` is where a real key is SUPPOSED to live
+# (it is gitignored); `.env.bak`, `.env.old`, `.env.local` and friends are
+# copies of it, and a copy is how a key reaches a commit. Their suffix is
+# `.bak` or `.local`, so a suffix list alone never read them.
+SCANNED_NAMES = ("Dockerfile",)
+
+
+def _is_scanned_name(path):
+    name = path.name
+    if name in SCANNED_NAMES:
+        return True
+    if name.startswith(".env") and name != ".env":
+        return True
+    return path.suffix in SCANNED_SUFFIXES
 
 
 # Directories that are never this repo's own source. Named ones first, then
@@ -125,7 +141,7 @@ def _is_virtualenv(path):
     walked into pip's vendored code and flagged a 32-hex string in
     `_elffile.py` as key-shaped. The run was correct about the string and
     wrong about the file, and a guard people have to argue with is one they
-    learn to suppress (CLAUDE.md §22).
+    learn to suppress.
 
     Structural rather than by name, for the same reason a parser anchors on a
     URL pattern instead of a CSS class: `venv`, `.venv`, `.v`, `env39` and
@@ -138,15 +154,21 @@ def _is_virtualenv(path):
 def scanned_files():
     # Walked top-down so a virtualenv is pruned once, at its root, instead of
     # being re-tested for every file inside it.
+    #
+    # Exclusions are tested on the path RELATIVE to the repo root. Testing
+    # the absolute path meant a clone under a parent directory called
+    # `build`, `venv` or `env` skipped every file and reported "0 files
+    # scanned, nothing credential-shaped".
     skip_roots = []
     for path in sorted(REPO.rglob("*")):
+        rel_parts = path.relative_to(REPO).parts
         if path.is_dir():
             if path.name in _SKIP_NAMES or _is_virtualenv(path):
                 skip_roots.append(path)
             continue
-        if path.suffix not in SCANNED_SUFFIXES:
+        if not _is_scanned_name(path):
             continue
-        if any(part in _SKIP_NAMES for part in path.parts):
+        if any(part in _SKIP_NAMES for part in rel_parts):
             continue
         if any(root in path.parents for root in skip_roots):
             continue
@@ -249,8 +271,8 @@ def secret_check():
             # contains the word "hash" 88 times, so one allowlisted token
             # anywhere in it exempted every match in the file. Measured by
             # planting a real-shaped key and watching the scan report
-            # "nothing credential-shaped" (CLAUDE.md §22: a control is only
-            # worth what the edit it actually made is worth).
+            # "nothing credential-shaped" — a control is only worth what the
+            # edit it actually made is worth.
             for match in CREDENTIALLED_URL.finditer(line):
                 if _allowed_near(line, match.start(), match.end(),
                                  CREDENTIAL_ALLOWED):
@@ -266,6 +288,9 @@ def secret_check():
                               f"— a 32-char hex string, the shape of a "
                               f"2captcha key")
 
+    if scanned == 0:
+        failed.append("0 files scanned — the scan excluded the whole repo, "
+                      "which is a broken scan, not a clean one")
     if not failed:
         print(f"ok       {scanned} files scanned, nothing credential-shaped")
     return failed
@@ -306,7 +331,9 @@ def history_check():
 
     failed, scanned = [], 0
     for sha, path in objects:
-        if not (path.endswith(SCANNED_SUFFIXES) or path in ("Dockerfile",)):
+        name = path.rsplit("/", 1)[-1]
+        if not (path.endswith(SCANNED_SUFFIXES) or name in SCANNED_NAMES
+                or (name.startswith(".env") and name != ".env")):
             continue
         kind = subprocess.run(["git", "cat-file", "-t", sha], cwd=REPO,
                               capture_output=True, text=True).stdout.strip()

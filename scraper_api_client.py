@@ -8,7 +8,7 @@ What this path can and cannot do HERE, measured
 -----------------------------------------------
 This is the one engine in this repo that cannot read comments, and the
 reason is a property of the SITE rather than of the service — so it is
-stated with the measurement rather than as an opinion (CLAUDE.md §19).
+stated with the measurement rather than as an opinion.
 
 YouTube puts no comments in its HTML. The document ships a placeholder and
 the browser then asks for them over a POST to `/youtubei/v1/next`. A
@@ -32,7 +32,7 @@ domcontentloaded"), so `--wait-state` no longer offers it. The second row
 above therefore cannot be reproduced today; its conclusion (no comments in
 the document) does not depend on it, since the no-waitFor row says the same.
 
-Control, per CLAUDE.md §20: a deliberately wrong key answered HTTP 401 in
+Control: a deliberately wrong key answered HTTP 401 in
 0.1 s where the real one answered 200 in 6.7 s, so the endpoint is
 evaluating credentials and the 200s above are real work.
 
@@ -52,7 +52,7 @@ somebody else's browser infrastructure and a specific exit country.
 
     # TWOCAPTCHA_KEY and YOUTUBE_URL are read from .env, so neither needs
     # to be typed — a secret in argv is readable by anything that can run
-    # `ps` (CLAUDE.md §3).
+    # `ps`.
 """
 
 import argparse
@@ -298,7 +298,7 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
             "either a page kind this client does not read or a change in "
             "the site. NOT reported as 'no video': a served page that "
             "parses to nothing is our bug, not an empty result "
-            "(CLAUDE.md §20).", len(html), dump)
+            ".", len(html), dump)
         return 1
 
     version = client_version_from_text(html)

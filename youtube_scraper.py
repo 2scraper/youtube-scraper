@@ -7,10 +7,9 @@ because that quick start did not work. The repo told a reader to install
 answers plain HTTPS — and then to run `playwright_scraper.py`, which
 imports Playwright at module level and therefore died with
 `ModuleNotFoundError` on their first command. Found by the 2026-09-25
-audit; CLAUDE.md §23 says to run your own README verbatim in a fresh
-clone, and nobody had.
+audit: nobody had run the README verbatim in a fresh clone.
 
-The module-level import in the engines is CORRECT and stays (§10): the
+The module-level import in the engines is CORRECT and stays: the
 offline suite's skip and CI's `python -c "import playwright_scraper"`
 both depend on it. What was wrong is that a browser engine was also the
 only CLI. The run itself is in `run_core.py`; this file binds it to a
@@ -66,7 +65,14 @@ def main(argv=None) -> int:
         # The caller said never start one, so do not even look for it.
         driver = run_core.NoDriver()
     elif must_have_browser:
-        driver = load_driver(args.engine)          # raises with the command
+        try:
+            driver = load_driver(args.engine)
+        except SystemExit as exc:
+            # A missing engine library is an environment/usage problem,
+            # so it exits 2 like every other usage error — not 1, which
+            # this family reserves for a crash.
+            print(str(exc), file=sys.stderr)
+            return 2
     else:
         # `auto`: read over HTTPS and keep a real engine in hand in case
         # the site refuses. The engine's runtime is started on FIRST USE,
