@@ -213,11 +213,22 @@ republishing them is a separate act from YouTube showing them on its own
 page. Everything the site generates is untouched: the counts, the
 timestamps, the flags, the video.
 
+**In the CSV only, a cell that starts with `=`, `+`, `-`, `@`, a tab or a
+line break gets a leading `'`**, so a spreadsheet reads it as text rather
+than running it as a formula. That includes every `author_name`, which on
+YouTube is an `@handle`. Numbers and the JSON output are untouched, and the
+sidecar records how many cells were changed as `csv_cells_escaped`.
+
 **A reply's id contains its parent's**, separated by a dot, so threading
 needs no bookkeeping: `parent_id` is derived from `sku`.
 
 **Exit codes**: `0` ok · `1` crash · `2` bad usage · `3` blocked · `4` no
 comments · `5` the content was never obtained · `6` partial.
+
+**A served page that parses to nothing is a parser failure, not "no
+comments".** It is recorded as `stop_reason: parse_error` with the page in
+`pages_failed`: exit `5` on the first page, exit `6` after rows were
+gathered.
 
 **A run is `complete` only if nothing failed.** That includes reply threads
 and the `/player` call: if `--replies` asked for twenty threads and three
@@ -361,6 +372,14 @@ python3 env_config.py
 Precedence, highest first: an explicit flag → an exported environment
 variable → `.env` → the default.
 
+`YOUTUBE_URL` is a default video for `--mode comments` and `--mode video`;
+`.env.example` ships it commented out. A `--mode search` query is only ever
+taken from `--url`.
+
+Output files are written atomically. A new file gets the mode your umask
+gives it (`0644` under the usual `022`); a file being replaced keeps its
+own mode.
+
 `TWOCAPTCHA_KEY` is one key for four separately billed 2Captcha products:
 captcha solving, the Scraping Browser API, proxies and fingerprints.
 
@@ -369,7 +388,7 @@ captcha solving, the Scraping Browser API, proxies and fingerprints.
 ## Comparing two runs
 
 ```bash
-python3 diff_runs.py yesterday.json today.json
+python3 diff_runs.py --old yesterday.json --new today.json
 ```
 
 It refuses to compare runs whose `mode`, `source` or `sort` differ, and

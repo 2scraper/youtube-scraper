@@ -4,7 +4,7 @@ Shared by all three browser engines and the HTTP path so they cannot
 quietly disagree about whether a response is worth retrying, worth paying
 a solver for, or worth reporting as a block. Three copies of that triage
 drift, and the drift is silent: one engine reporting exit 3 where its twin
-reports exit 0 on the same video (CLAUDE.md §1).
+reports exit 0 on the same video.
 
 Policy and pure algorithms only. No JavaScript crosses this boundary —
 Selenium's `execute_script` takes a function BODY with an explicit
@@ -80,7 +80,7 @@ def wait_for_count(count: Callable[[str], int], selector: str, minimum: int,
 
     The caller passes a counting primitive rather than a snippet, and the
     primitive must be a protocol call — `querySelectorAll` through the
-    driver — never an evaluated STRING. CLAUDE.md §18: a site whose
+    driver — never an evaluated STRING. A site whose
     Content-Security-Policy lacks `unsafe-eval` kills
     `wait_for_function`-style string evaluation, and YouTube's CSP is
     strict. Polling a real function object goes through
@@ -108,8 +108,8 @@ def classify(payload, status: Optional[int] = None, url: str = "",
     """Name what YouTube answered with. See product_parser.detect_page_state.
 
     The argument ORDER is the contract: every caller writes
-    `classify(payload, status, url)`. CLAUDE.md §17 records a sibling repo
-    whose two engines called `classify(html, url=…)` against a callee
+    `classify(payload, status, url)`. A sibling repo had two engines
+    that called `classify(html, url=…)` against a callee
     taking `status` second, and both crashed on their FIRST fetch —
     invisible to import, `--help`, `compileall` and four hundred green
     offline assertions, because none of those calls a function the way a
@@ -164,7 +164,7 @@ STATE_POLICY = {
     # answer about the video, so it is not blocked and not retried — a
     # different exit cannot change the viewer's age — and above all it
     # must not solve, because there is no challenge on the page to solve
-    # (CLAUDE.md §19: "unsolvable" is a property of a PAGE).
+    # ("unsolvable" is a property of a PAGE, not of a site).
     STATE_AUTH_REQUIRED: {"retry": False, "solve": False, "blocked": False,
                           "parse": False},
     # An HTTP error that is not a recognised refusal — a 500, a gateway's
@@ -175,7 +175,7 @@ STATE_POLICY = {
     # parsed to zero rows. That is OUR bug, not an empty video, and it gets
     # its own name so it cannot be reported as "no comments" — which would
     # send the reader to check the video id instead of the parser
-    # (CLAUDE.md §20). One retry in case a response was truncated, and
+    #. One retry in case a response was truncated, and
     # always worth a dump.
     "parse_error": {"retry": True, "solve": False, "blocked": False,
                     "parse": False},
@@ -204,7 +204,7 @@ def should_parse(state: str) -> bool:
 
 # Whether a blocked page is worth re-fetching at all. CONSULTED by the
 # engines rather than merely documented — setting it False really does stop
-# the retry loop. (CLAUDE.md §17: a policy constant nothing reads is the
+# the retry loop. (A policy constant nothing reads is the
 # same defect as dead code, and this family shipped one for months.)
 RETRY_ON_BLOCKED = True
 
@@ -217,7 +217,7 @@ BLOCK_RETRIES_WITHOUT_POOL = 1
 # The solve budget
 # ---------------------------------------------------------------------------
 #
-# One paid solve per page. CLAUDE.md §23 records that this constant has
+# One paid solve per page. This constant once
 # read like an enforced limit in every repo in this family and was not one:
 # every engine calls the captcha handler TWICE per attempt — once before
 # the response is classified, so a challenge is cleared before anything is
@@ -264,7 +264,7 @@ class SolveBudget:
 def pagination_is_addressable(url: str = "", mode: str = "comments") -> bool:
     """Whether page N of this run can be fetched without walking to it.
 
-    CLAUDE.md §18 says to ask this per ROUTE rather than per site, and on
+    Ask this per ROUTE rather than per site: on
     YouTube the three modes answer differently:
 
       * `comments` — NO, and not by a near miss. A page is addressed by an
@@ -313,7 +313,7 @@ def concurrency_limit(cdp_endpoint: Optional[str]) -> Optional[int]:
 
     The Scraping Browser API allows ONE live connection per profile, so N
     workers sharing a `pid` collide with `profile_locked`. Several `pid`s,
-    one run each, is the way to parallelise that path (CLAUDE.md §7).
+    one run each, is the way to parallelise that path.
     """
     return 1 if cdp_endpoint else None
 
@@ -334,7 +334,7 @@ def concurrency_for_mode(mode: str, concurrency: int) -> int:
 def sample_share(collected: int, total: Optional[int]) -> Optional[float]:
     """What percentage of the video's comments a run actually holds.
 
-    CLAUDE.md §21: "complete" and "exhaustive" are different words, and a
+    "Complete" and "exhaustive" are different words, and a
     sidecar that says only the first is lying by omission. A five-page run
     of a video with 2,457,619 comments is complete — every page it asked
     for arrived — and is 0.004% of the comments. This number goes in the

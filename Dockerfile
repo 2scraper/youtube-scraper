@@ -4,8 +4,8 @@
 #
 #   docker build -t youtube-scraper .
 #   docker run --rm -v "$PWD/out:/out" youtube-scraper \
-#     --mode comments \
-#     --pages 3 --out /out/software-engineer
+#     --mode comments --url dQw4w9WgXcQ \
+#     --pages 3 --out /out/comments
 #
 # Pass --proxy/--twocaptcha-key the same way as running locally, or mount a
 # .env at /app/.env — nothing here bakes in a credential.

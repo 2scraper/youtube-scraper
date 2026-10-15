@@ -8,15 +8,15 @@ lines each, 2,156 of them duplicated — and the five that differed were
 exactly the five that touch a browser library. `scrape()` differed by one
 line, the engine's own name.
 
-So this is a move, not a rewrite, and it is CLAUDE.md §26's pattern
+So this is a move, not a rewrite, and it is the family's shared-loop pattern
 (binance-scraper: one fetch loop, three drivers) applied to a repo whose
 duplication had already been measured and left in place.
 
 Two things follow, and both were the point:
 
 * **The HTTP transport no longer needs a browser library to exist.**
-  `playwright_scraper.py` imports Playwright at module level — §10
-  requires that, so the suite's skip and CI's import check keep working —
+  `playwright_scraper.py` imports Playwright at module level — it
+  must, so the suite's skip and CI's import check keep working —
   and it used to be the only CLI, including for the path that opens no
   browser. A reader following this repo's own quick start, which installs
   `requirements.txt` and no engine, met `ModuleNotFoundError: No module
@@ -37,7 +37,7 @@ code reached into a browser.
     launch_local(args, pool)  -> a session
     connect_remote(args)      -> a session
 
-No JavaScript crosses that boundary (CLAUDE.md §1): Selenium's
+No JavaScript crosses that boundary: Selenium's
 `execute_script` takes a function BODY with an explicit return while the
 other two take an arrow expression, so a shared module that passed JS
 would quietly acquire one driver's dialect.
@@ -90,7 +90,7 @@ logger = logging.getLogger("youtube_scraper")
 MODES = ("comments", "video", "search")
 DEFAULT_MODE = "comments"
 
-# Every remote call is bounded (CLAUDE.md §8). Playwright's request API
+# Every remote call is bounded. Playwright's request API
 # takes a per-call timeout and does not impose one of its own.
 REQUEST_TIMEOUT_MS = 30_000
 NAVIGATION_TIMEOUT_MS = 60_000
@@ -98,8 +98,7 @@ NAVIGATION_TIMEOUT_MS = 60_000
 # How many comments a `--pages N` run expects, used only to make the
 # closing log honest about what N meant.
 # The columns only `/youtubei/v1/player` publishes. A video row missing
-# any of them was built from half its sources, and CLAUDE.md §24 is the
-# precedent: half an identity is worse than none precisely because it
+# any of them was built from half its sources, and half an identity is worse than none precisely because it
 # looks whole.
 PLAYER_ONLY_FIELDS = ("published_at", "duration_seconds", "category",
                       "keywords")
@@ -113,7 +112,7 @@ REPLIES_PER_PAGE = parser.REPLY_PAGE_SIZE
 class PageOutcome:
     """One fetch attempt's result, in page order rather than arrival order.
 
-    CLAUDE.md §8: merging by arrival order makes the output depend on which
+    Merging by arrival order makes the output depend on which
     worker finished first. Workers return these and the caller sorts.
     """
     number: int
@@ -137,7 +136,7 @@ class PageOutcome:
 def _mask_credentials(text: Any) -> str:
     """Mask every credential in a string, not just the first.
 
-    CLAUDE.md §8: a masker that handles the first occurrence prints the
+    A masker that handles the first occurrence prints the
     password the other four times and looks like it is working — Playwright
     repeats a CDP endpoint five times in one error, once in the message and
     four more in its call log.
@@ -152,7 +151,7 @@ def _mask_credentials(text: Any) -> str:
 def _chrome_ua(chromium_version: str) -> str:
     """A user agent built from the Chromium actually installed.
 
-    CLAUDE.md §8: a hardcoded version drifts from whatever is installed,
+    A hardcoded version drifts from whatever is installed,
     and claiming an older Chrome than the JS engine and TLS handshake
     report is itself a mismatch.
     """
@@ -163,7 +162,7 @@ def _chrome_ua(chromium_version: str) -> str:
 def _proxy_failure(exc: Exception) -> str:
     """Name a dead proxy, or "" for anything else.
 
-    CLAUDE.md §8: Chromium reports a dead proxy as a generic error, not a
+    Chromium reports a dead proxy as a generic error, not a
     timeout, and the two want opposite responses — a timeout deserves
     another try at the SAME exit, a dead proxy a DIFFERENT one. Catching
     only the timeout type let this escape as a traceback in a sibling repo.
@@ -192,8 +191,8 @@ def _open_http(args, pool: Optional[ProxyPool]) -> HttpSession:
     if args.fingerprint:
         # An HTTP client can carry the user agent and the language list but
         # not the client hints, the platform or the WebGL strings — so it
-        # can only ever wear HALF an identity, which CLAUDE.md §24 measures
-        # as worse than none. Refused rather than half-applied.
+        # can only ever wear HALF an identity, which was measured on a sibling
+        # site as worse than none. Refused rather than half-applied.
         logger.warning("--fingerprint is ignored on the HTTP transport: an "
                        "HTTP client cannot carry client hints, so it would "
                        "wear half an identity, which is worse than none. "
@@ -207,7 +206,7 @@ def _open_session(pw, args, pool: Optional[ProxyPool], transport=None):
     the `auto` fallback used to escalate by assigning
     `args.transport = "browser"` — and `args` is one object shared by
     every worker, so one worker meeting a refusal silently switched all of
-    them (2026-09-25 audit, §5.4). The escalation is now recorded on the
+    them (2026-09-25 audit). The escalation is now recorded on the
     worker's own session box.
     """
     transport = transport or getattr(args, "transport", "auto")
@@ -226,7 +225,7 @@ def _prime_session(session, args, url: str) -> Optional[int]:
     Also where the client version comes from, at no extra cost: the watch
     page states `INNERTUBE_CLIENT_VERSION` and the browser already has it.
     A hardcoded version drifts from what the site is serving, which is the
-    same objection CLAUDE.md §8 makes to a hardcoded user agent.
+    same objection that applies to a hardcoded user agent.
 
     Falls back to `/sw.js_data` — 2.8 KB against the watch page's 1.4 MB —
     and then to the constant, and says which it used.
@@ -296,13 +295,13 @@ def _handle_captcha_in_browser(session, args,
     """Detect and, if it is worth paying for, solve a challenge.
 
     Both call sites — before classification and after — go through the same
-    `SolveBudget`, which is the CLAUDE.md §23 fix: `SOLVES_PER_PAGE` read
+    `SolveBudget`. `SOLVES_PER_PAGE` once read
     like an enforced limit in every repo in this family and was not one,
     because only the second of the two calls was counted. One page bought
     three solves on a site where a challenge rendered on every fetch.
 
     A missing key or a solver error is a WARNING and the run continues
-    (CLAUDE.md §8): detection is not the same as blocking, and a run that
+: detection is not the same as blocking, and a run that
     already has data must not die because a solve failed.
     """
     if args.solve_captcha == "never":
@@ -365,7 +364,7 @@ def _handle_captcha_in_browser(session, args,
 def _dump(args, name: str, payload: Any) -> None:
     """Write the exact bytes a call returned.
 
-    On SUCCESS too, not only on failure (CLAUDE.md §9): a run can return
+    On SUCCESS too, not only on failure: a run can return
     the right count with a field silently unpopulated, and then the exact
     payload is the only way to tell a parsing bug from a too-early
     snapshot.
@@ -402,7 +401,7 @@ def _fetch_with_policy(session_box: Dict[str, Any], pw, args,
 
     `session_box` holds the live session so a rotation can replace it: a
     rotation is a fresh browser, never a proxy swapped under a live
-    session (CLAUDE.md §8).
+    session.
     """
     budget = SolveBudget()
     attempts = max(1, int(args.retries) + 1)
@@ -430,12 +429,14 @@ def _fetch_with_policy(session_box: Dict[str, Any], pw, args,
                 # responses: a timeout deserves another try at the SAME
                 # exit, a dead proxy a DIFFERENT one. Chromium reports it
                 # as a generic error rather than as a timeout, which is how
-                # this escaped as a traceback in a sibling repo
-                # (CLAUDE.md §8).
+                # this escaped as a traceback in a sibling repo.
                 logger.warning("%s failed at the EXIT, not at the site: %s "
-                               "via %s. Rotating rather than retrying the "
-                               "same address.", label, exit_failed,
-                               mask(session.proxy_url))
+                               "via %s. %s", label, exit_failed,
+                               mask(session.proxy_url),
+                               "Rotating rather than retrying the same "
+                               "address." if pool else
+                               "No proxy pool, so there is no other exit to "
+                               "rotate to.")
                 if pool:
                     pool.advance(exit_failed)
                     session_box["session"].close()
@@ -513,9 +514,9 @@ def _rotate_if_per_page(session_box, pw, args, pool, why: str) -> bool:
     run whose pages all succeeded stayed on one address for its whole
     life. The flag read like a traffic-spreading control and was a
     recovery control — a setting that looks configurable and is not
-    (CLAUDE.md §3 says that about `.env`; it is the same defect here).
+    (the same defect as a `.env` setting the code never reads).
 
-    A rotation is a FRESH BROWSER (CLAUDE.md §8): cookies a bot manager
+    A rotation is a FRESH BROWSER: cookies a bot manager
     issued against exit A and replayed from exit B are a stronger signal
     than either address alone, so the session is torn down and rebuilt
     rather than having its proxy swapped underneath it.
@@ -597,7 +598,7 @@ def _run_comments(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any
     if not page_flow.pagination_is_addressable("", args.mode):
         # Said once, in the run's own log, rather than left to be inferred
         # from the absence of workers: page 5's address is inside page 4,
-        # so this walk cannot be planned ahead or split (CLAUDE.md §7).
+        # so this walk cannot be planned ahead or split.
         logger.info("This listing is not independently addressable — each "
                     "page's token comes from the page before it, so the "
                     "walk is sequential.")
@@ -622,6 +623,19 @@ def _run_comments(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any
             _dump(args, "comments_p1", payload)
 
         if state == parser.STATE_EMPTY:
+            stated = (parser.total_comment_count(payload)
+                      or parser.panel_comment_count(watch)[0])
+            if page_no == 1 and stated:
+                # The first page held no comment items, yet the site states
+                # a nonzero total for this video. That is not "no comments":
+                # the response's shape moved and nothing here read it.
+                logger.error("Comments page 1 held no comment items although "
+                             "the site states %s comments. That is a parser "
+                             "failure, not an empty video. Re-run with "
+                             "--dump-html and read the payload.", stated)
+                pages_failed.append(page_no)
+                stop_reason = "parse_error"
+                break
             stop_reason = "pagination_exhausted"
             break
         if not page_flow.should_parse(state):
@@ -636,7 +650,7 @@ def _run_comments(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any
         if not page_rows:
             # A payload the site plainly served that parsed to nothing is
             # OUR bug, and it gets its own name so it cannot be reported as
-            # "this video has no comments" (CLAUDE.md §20).
+            # "this video has no comments".
             logger.error("Page %d was served (%d bytes) and parsed to zero "
                          "rows. That is a parser failure, not an empty "
                          "video. Re-run with --dump-html and read the "
@@ -757,6 +771,12 @@ def _run_replies(session_box, pw, args, pool, threads, video_id, video_title,
                                    video_title=video_title, sort=args.sort,
                                    page=depth, scraped_at=scraped_at,
                                    row_cls=Comment)
+            if not batch:
+                # The page held reply items and none of them parsed: the
+                # thread was served and lost here, so it counts as failed.
+                failures.append({"parent_id": parent, "depth": depth,
+                                 "state": "parse_error", "status": status})
+                break
             rows.extend(dedupe_by_key(batch, seen, key="sku"))
             token = parser.next_page_token(payload)
             if args.delay:
@@ -953,7 +973,7 @@ def _fetch_videos_concurrently(pw, args, pool, ids, scraped_at, workers):
     Workers start on DIFFERENT exits — each gets its own pool object holding
     the same exits rotated to a different offset — so no thread needs a
     lock: the concurrency is safe by construction rather than by discipline
-    (CLAUDE.md §7).
+.
     """
     work: "queue.Queue[Tuple[int, str]]" = queue.Queue()
     for number, vid in enumerate(ids, start=1):
@@ -992,7 +1012,7 @@ def _fetch_videos_concurrently(pw, args, pool, ids, scraped_at, workers):
                                                        number, scraped_at)
                         except Exception as exc:           # noqa: BLE001
                             # A worker that raises must neither hang the run
-                            # nor lose its siblings' pages (CLAUDE.md §10).
+                            # nor lose its siblings' pages.
                             outcome = PageOutcome(
                                 number=number, video_id=vid, state="error",
                                 error=_mask_credentials(exc))
@@ -1038,7 +1058,7 @@ def _worker_pool(pool: Optional[ProxyPool], worker_index: int):
     Each worker gets its OWN pool object holding the same exits rotated to
     a different offset, so workers start on distinct addresses and no
     thread needs a lock — the concurrency is safe by construction rather
-    than by discipline (CLAUDE.md §7).
+    than by discipline.
     """
     if not pool:
         return None
@@ -1080,8 +1100,17 @@ def _run_search(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]
         page_rows = parse_search(payload, query=query, scraped_at=scraped_at,
                                  page=page_no, row_cls=Video)
         if not page_rows:
-            stop_reason = "pagination_exhausted" if page_no > 1 else "parse_error"
-            if page_no == 1:
+            # A later page that parses to nothing ends the listing only if
+            # the site also stopped offering a next page. A page that still
+            # carries a continuation token was served as part of a longer
+            # listing, so zero rows from it means the parser lost them.
+            if page_no > 1 and not parser.search_page_token(payload):
+                stop_reason = "pagination_exhausted"
+            else:
+                logger.error("Search page %d was served and parsed to zero "
+                             "videos. That is a parser failure, not the end "
+                             "of the results.", page_no)
+                stop_reason = "parse_error"
                 pages_failed.append(page_no)
             break
         rows.extend(dedupe_by_key(page_rows, seen, key="sku"))
@@ -1109,7 +1138,7 @@ def scrape(driver, args) -> int:
     if pool and args.concurrency > 1 and args.mode == "video":
         logger.info("%d workers over %d exit(s).", args.concurrency, len(pool))
     elif args.concurrency > 1 and not pool:
-        # Warn, do not refuse (CLAUDE.md §7).
+        # Warn, do not refuse.
         logger.warning("--concurrency %d with no proxy pool sends %dx the "
                        "traffic from one address, which is a faster way to "
                        "get it scored than to gather data.",
@@ -1206,8 +1235,9 @@ def parse_args(argv: Optional[List[str]] = None):
                    help="A YouTube video URL (/watch, /shorts, /live, "
                         "youtu.be) or a bare 11-character video id. In "
                         "--mode video, a comma-separated list of them. In "
-                        "--mode search, the SEARCH QUERY instead. Falls back "
-                        "to YOUTUBE_URL from the environment or .env.")
+                        "--mode search, the SEARCH QUERY instead. Comments "
+                        "and video modes fall back to YOUTUBE_URL from the "
+                        "environment or .env; search never does.")
     p.add_argument("--mode", choices=MODES, default=DEFAULT_MODE,
                    help="comments (default): a video's comment threads. "
                         "video: one video's metadata, including the exact "
@@ -1326,11 +1356,34 @@ def parse_args(argv: Optional[List[str]] = None):
     headless.add_argument("--headful", dest="headless", action="store_false")
 
     args = p.parse_args(argv)
+
+    # Counts and waits are validated before anything runs. A negative
+    # --delay used to fetch page 1 and then crash in time.sleep with the
+    # gathered rows lost; a negative --retries or --pages 0 ran silently
+    # with numbers the run never honoured.
+    for flag, dest, floor in (("--pages", "pages", 1),
+                              ("--reply-pages", "reply_pages", 1),
+                              ("--concurrency", "concurrency", 1),
+                              ("--retries", "retries", 0),
+                              ("--proxy-block-retries", "proxy_block_retries", 0),
+                              ("--delay", "delay", 0),
+                              ("--retry-delay", "retry_delay", 0)):
+        value = getattr(args, dest)
+        if value < floor:
+            p.error(f"{flag} must be at least {floor}, got {value}.")
+
+    # What was TYPED, before the environment fills anything in. A search
+    # query is only ever taken from the command line: YOUTUBE_URL names a
+    # video, and a video URL silently searched for as text is not a query
+    # anyone asked for.
+    typed_url = args.url
     env_config.apply(args)
 
     if args.mode == "search":
+        args.url = typed_url
         if not args.url:
-            p.error("--mode search needs a query in --url.")
+            p.error("--mode search needs a query in --url (YOUTUBE_URL is "
+                    "not used as a search query).")
     else:
         if not args.url:
             p.error("no --url given, and YOUTUBE_URL is not set in the "
@@ -1357,8 +1410,6 @@ def parse_args(argv: Optional[List[str]] = None):
             p.error("the Scraping Browser API allows one live connection per "
                     "profile, so workers collide (profile_locked). Use "
                     "several pids, one run each.")
-    if args.reply_pages < 1:
-        p.error("--reply-pages must be at least 1.")
     if args.category is None:
         args.category = (args.url if args.mode == "search"
                          else (video_id_from_url(str(args.url).split(",")[0])
