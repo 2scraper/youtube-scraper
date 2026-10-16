@@ -63,9 +63,7 @@ rather than leaving it to be discovered from a bill or a chart.
 
 ### Changed
 
-- CI only: the canary's paid `scraper-api` job now runs weekly (Mondays 06:17
-  UTC) and on a manual dispatch; the free `core-only`, `comments` and `video`
-  jobs still run daily.
+- CI only: the whole canary, free and paid jobs alike, now runs weekly (Mondays 06:17 UTC) and on a manual dispatch; the daily schedule is removed.
 
 ## [0.4.0] — 2026-10-15
 

@@ -83,10 +83,10 @@ Then the rest of the presentation, in the order that matters:
 1. `python3 smoke_test.py` green, and the canary dispatched at least once.
    Unlike most siblings in this family the canary here is **not** gated on a
    secret: YouTube's comment endpoint is served to a bare GitHub runner, so
-   it runs a real 3-page scrape daily and is expected to be GREEN. That is
+   it runs a real 3-page scrape weekly (Mondays) and is expected to be GREEN. That is
    not a convenience — it is what keeps the README's central claim honest.
    If YouTube ever puts that endpoint behind a challenge or a key, the badge
-   goes red the next morning and the claim is retested without anyone
+   goes red on the next weekly run and the claim is retested without anyone
    having to remember to.
 2. The repo description, homepage and topics set, naming this site and
    what the scraper actually reads.
