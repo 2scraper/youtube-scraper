@@ -359,6 +359,19 @@ A deliberately wrong key answered HTTP 401 in 0.1 s against the real key's
 What the client does do is `--mode video`, at $0.0005 per task, which is
 what the watch document is genuinely good for.
 
+**What the Scraper API path fills (as of 2026-10-16).** It requests
+`/watch?v=<id>&hl=en&gl=US`, so the page is in English whatever country
+the service fetches from. Besides the rendered figures (title, channel,
+view and like counts, description), the watch document inlines the same
+player data the browser engines get from their `/player` call, and this
+path reads `published_at`, `duration_seconds`, `category`, `keywords`, the
+exact `view_count` and the exact `like_count` from it. That data is used
+only when it names the requested video id; a column it does not state
+stays null. If the document carries no player data for the video, those
+columns are null and the run is `partial` (exit `6`,
+`stop_reason: player_incomplete`, the reason in the sidecar's
+`player_incomplete`). Comments still need one of the other engines.
+
 ---
 
 ## Configuration
