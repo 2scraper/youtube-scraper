@@ -90,7 +90,10 @@ says the page was served, gives its size, and tells you to re-run with
 `--dump-html`. That means the payload changed shape and this parser needs
 updating — it is never "the video has no comments". The dumped JSON is the
 evidence. The same failure on a later page, after rows were gathered, is
-exit 6 with that page in `pages_failed`.
+exit 6 with that page in `pages_failed`. A `--mode video` row that lost
+`view_count` (or `title`) is also exit 6 with `stop_reason: parse_error`;
+the Scraper API path saves the document it was given as
+`<out>_scraperapi_debug.html`.
 
 **A dead proxy, a timeout, or a remote service failing:**
 
