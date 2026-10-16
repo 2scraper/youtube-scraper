@@ -40,8 +40,12 @@ rather than leaving it to be discovered from a bill or a chart.
 
 ### Fixed
 
-- The Finnish watch-document fixture carried the capturing machine's IP
-  address inside a signed playback URL; the trimmer now drops that subtree.
+- Fixtures no longer carry the capturing machine's IP address. YouTube
+  signs a playback URL with `&ip=<address>`, and the `watch`,
+  `comments_off` and `search` fixtures (since v0.1.0) and the Finnish
+  watch document carried it; the subtree holding it is dropped, both
+  fixture generators refuse an `ip=` parameter, and the offline suite
+  fails on any `ip=` parameter or IP literal in a fixture or sample output.
 
 - **The Scraper API path lost the view count on any non-English page.** The
   watch document comes back in the language of the service's exit, and the
