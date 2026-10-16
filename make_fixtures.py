@@ -104,7 +104,10 @@ HTML_SOURCES = {"cdp_served_watch": "cdp_served_watch.html"}
 # exit's language: on 2026-10-16 a non-English document is what made the
 # Scraper API path write a row with no view count. Captured that day with
 # plain curl and a browser User-Agent from a Finnish address (hl=fi).
-WATCH_DOCUMENT_SOURCES = {"watch_document_fi": "watch_document_fi.html"}
+# The English one is the URL the Scraper API path now requests
+# (`&hl=en&gl=US`), captured the same way from the same address.
+WATCH_DOCUMENT_SOURCES = {"watch_document_fi": "watch_document_fi.html",
+                          "watch_document_en": "watch_document_en.html"}
 
 # Opaque per-response tokens: no value to a parser test, and not ours to
 # republish.
@@ -113,7 +116,10 @@ _DOCUMENT_DROP_KEYS = ("trackingParams", "clickTrackingParams",
                        "serializedShareEntity", "adPlacements",
                        "playerAds", "streamingData", "playbackTracking",
                        "storyboards", "attestation", "heartbeatParams",
-                       "frameworkUpdates")
+                       "frameworkUpdates",
+                       # A signed playback URL carrying the fetching
+                       # machine's own IP address (`&ip=`).
+                       "watchEndpointSupportedOnesieConfig")
 
 
 def _drop_keys(node):
@@ -716,8 +722,14 @@ def _verify_document(name, original_html, trimmed_html):
                                  row_cls=Video)
         if row is None:
             raise SystemExit(f"{name}: no video row")
-        rows.append((vars(row), parser.exact_view_count(
-            parser.player_response_from_html(html), row.sku)))
+        player = parser.player_response_from_html(html)
+        views = parser.exact_view_count(player, row.sku)
+        likes = parser.exact_like_count(player, row.sku)
+        # And the row the Scraper API path builds once the inlined player
+        # response is merged, so the trim cannot drop a column it fills.
+        if parser.player_is_about(player, row.sku):
+            parser.apply_player(player, row)
+        rows.append((vars(row), views, likes))
     if rows[0] != rows[1]:
         raise SystemExit(f"{name}: trimmed document parses differently")
 
@@ -772,7 +784,7 @@ def main() -> int:
         original = path.read_text(encoding="utf-8")
         html = trim_watch_document(original)
         for leak in ('"commentId"', '"displayName"', '"visitorData"',
-                     "ggpht.com/ytc"):
+                     "ggpht.com/ytc", "&ip="):
             if leak in html:
                 raise SystemExit(f"{name}: carries {leak!r} — re-trim it")
         _verify_document(name, original, html)

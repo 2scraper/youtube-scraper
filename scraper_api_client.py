@@ -38,7 +38,14 @@ evaluating credentials and the 200s above are real work.
 
 So `--mode video` is what this client does, and it does it well: the watch
 document carries the video's whole metadata inline, which is exactly the
-shape a rendered-HTML service is good for. For comments, use one of the
+shape a rendered-HTML service is good for. Besides the rendered figures
+(`ytInitialData`), the document inlines the player response
+(`ytInitialPlayerResponse`), and since 2026-10-16 this client reads the
+exact upload date, duration, category, keywords, view count and like count
+from it — only when it names the requested video id; a column it does not
+state stays null. The page is requested with `hl=en&gl=US`, so the
+rendered text (the like-count label among it) is English whatever the
+service's exit country is. For comments, use one of the
 three browser engines — or nothing at all, because the endpoint they call
 is ungated and free.
 
@@ -66,10 +73,12 @@ from typing import Optional
 
 import requests
 
-from product_parser import (client_version_from_text, detect_bot_challenge,
+from product_parser import (apply_player, client_version_from_text,
+                            detect_bot_challenge, exact_like_count,
                             exact_view_count, initial_data_from_html,
-                            is_supported_url, missing_core_fields,
-                            parse_video, player_response_from_html,
+                            is_supported_url, localised_watch_url,
+                            missing_core_fields, parse_video,
+                            player_is_about, player_response_from_html,
                             video_id_from_url)
 from output_writer import Video, finish_run, utc_now
 import env_config
@@ -159,10 +168,20 @@ def _build_wait_for(args) -> Optional[dict]:
     return None
 
 
+def request_url(url: str) -> str:
+    """The URL the service is asked to fetch: the `/watch` form of the
+    requested video with `hl`/`gl` pinned. Without them the document came
+    back in the language of the service's exit (Finnish, German on
+    2026-10-16), and the like count is read from an English label."""
+    vid = video_id_from_url(url)
+    return localised_watch_url(vid) if vid else url
+
+
 def fetch_html(args) -> str:
+    target = request_url(args.url)
     payload = {
         "task_type": "scrape",
-        "url": args.url,
+        "url": target,
         "data_format": "raw",   # we want HTML; product_parser does the rest
         "format": "json",       # so we get {"status", "headers", "body"}
         "timeout": min(args.timeout, MAX_API_TIMEOUT),
@@ -178,7 +197,7 @@ def fetch_html(args) -> str:
         logger.info("Routing through an existing browser session: %s",
                     _mask_credentials(args.cdp_url))
 
-    logger.info("POST %s (url=%s)", SYNC_ENDPOINT, args.url)
+    logger.info("POST %s (url=%s)", SYNC_ENDPOINT, target)
     resp = requests.post(
         SYNC_ENDPOINT,
         headers={"Authorization": f"Bearer {args.key}", "Content-Type": "application/json"},
@@ -322,9 +341,27 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
     # `ytInitialData` is in the exit's language ("1.827.082.109 Aufrufe"),
     # and on 2026-10-16 that is how this path wrote a row with no view
     # count and called the run complete. Only `viewCount` is taken from it.
-    exact = exact_view_count(player_response_from_html(html), row.sku)
+    player = player_response_from_html(html)
+    exact = exact_view_count(player, row.sku)
     if exact is not None:
         row.view_count = exact
+
+    # The rest of the inlined player response: the columns the browser
+    # engines get from their `/player` call. Merged only when it names THIS
+    # video id; a column it does not state stays null.
+    player_gap = None
+    empty = []
+    if player_is_about(player, row.sku):
+        apply_player(player, row)
+        likes = exact_like_count(player, row.sku)
+        if likes is not None:
+            row.like_count = likes
+        row.data_source = "innertube.watch+player"
+        empty = [name for name in PLAYER_ONLY_FIELDS
+                 if getattr(row, name, None) in (None, "", [])]
+    else:
+        player_gap = ("inline_player_response_absent" if player is None
+                      else "inline_player_response_for_another_video")
 
     missing = missing_core_fields(row)
     if missing:
@@ -338,15 +375,19 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                      "%s. That is a parser failure, not a complete run.",
                      ", ".join(missing), dump)
 
-    # What the document does NOT carry, said once, so nobody concludes the
-    # columns are broken. `/player` is a POST and this service issues a GET,
-    # so the exact upload date, the duration and the category are simply
-    # not reachable from here.
-    logger.info("Read %s — %s. `published_at`, `duration_seconds`, "
-                "`category` and `keywords` are null on this path: they come "
-                "from /youtubei/v1/player, which is a POST this service "
-                "does not make. The browser engines fill them.",
-                row.sku, (row.title or "")[:60])
+    logger.info("Read %s — %s.", row.sku, (row.title or "")[:60])
+    if player_gap:
+        # The served document normally carries it; without it these
+        # columns are null for want of a source, so the run is partial.
+        logger.warning("The document's inlined player response is not "
+                       "usable (%s), so %s are null on this row. The run is "
+                       "PARTIAL rather than complete.", player_gap,
+                       ", ".join(PLAYER_ONLY_FIELDS))
+    elif empty:
+        # The source is there and states nothing for these: information,
+        # not a fault (a video may carry no keywords).
+        logger.info("The inlined player response states no %s.",
+                    ", ".join(empty))
     if row.comments_enabled is False:
         logger.info("This video's comments are turned off.")
     elif row.comment_count:
@@ -360,33 +401,29 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
     # silently had nothing to read, and `diff_runs.py` refused every pair
     # involving a Scraper API run because it could not find a status.
     #
-    # `single_page_route` is COMPLETE here, and the distinction matters:
-    # the browser engines call a run with empty `/player` columns PARTIAL,
-    # because for them those columns are a second request that failed. On
-    # this path there is no second request to fail — the service issues a
-    # GET and `/player` is a POST — so the columns are unreachable BY
-    # ROUTE rather than missing. `player_fields_unreachable` says which it
-    # is, instead of letting a reader infer a fault from a null.
+    # Same contract as the browser engines: a lost core column is a parser
+    # failure, a missing player source makes the run partial, and a column
+    # the source answered without is recorded but is not a fault.
     return finish_run([row], args.out, args.format,
                       allow_empty=args.allow_empty, blocked=False,
                       stop_reason=("parse_error" if missing
+                                   else "player_incomplete" if player_gap
                                    else "single_page_route"),
                       pages_requested=1, pages_completed=1,
                       start_url=args.url, final_url=args.url,
                       mode="video", extra={
                           "engine": "scraper_api",
                           "category": args.category,
-                          "player_fields_unreachable": list(
-                              PLAYER_ONLY_FIELDS),
+                          "requested_url": request_url(args.url),
+                          "player_incomplete": player_gap,
+                          "player_columns_empty": empty or None,
                           "upstream_status": upstream_status,
                           "fields_unparsed": missing or None,
                       })
 
 
-# The columns this route cannot reach, named rather than left as four
-# nulls a reader has to guess about. The browser engines carry the same
-# tuple and treat it as a FAILURE when it is empty; here it is a property
-# of the transport.
+# The columns only the player response states. The browser engines carry
+# the same tuple; here the source is the copy inlined in the document.
 PLAYER_ONLY_FIELDS = ("published_at", "duration_seconds", "category",
                       "keywords")
 

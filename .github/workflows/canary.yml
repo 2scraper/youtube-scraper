@@ -386,12 +386,14 @@ jobs:
           row = json.load(open("canary_sapi.json"))[0]
           assert row["sku"] == "dQw4w9WgXcQ", row["sku"]
           assert row["view_count"], "no view count came through"
-          # And the documented limit: this path cannot fill the /player
-          # columns, because that endpoint is a POST the service does not
-          # make. Pinned so that the README stops being true loudly.
-          assert row["published_at"] is None, (
-              "published_at is populated on the Scraper API path — the "
-              "README says it cannot be, and one of the two is now wrong")
-          print("::notice::Scraper API read the video row; /player columns "
-                "are null, as documented.")
+          # The document's inlined player response states these; a null
+          # here means it moved or stopped naming this video.
+          assert row["published_at"], "no published_at from the document"
+          assert row["duration_seconds"], "no duration_seconds from the document"
+          assert row["data_source"] == "innertube.watch+player", row["data_source"]
+          meta = json.load(open("canary_sapi.meta.json"))
+          assert meta["status"] == "complete", meta["status"]
+          print(f"::notice::Scraper API read {row['sku']}: published "
+                f"{row['published_at']}, {row['duration_seconds']} s, "
+                f"{row['view_count']:,} views, like_count {row['like_count']}.")
           PY

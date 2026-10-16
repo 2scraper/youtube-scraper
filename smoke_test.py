@@ -64,6 +64,7 @@ fixing it stays fixed:
 
 import argparse
 import ast
+import copy
 import csv
 import inspect
 import io
@@ -3877,6 +3878,202 @@ def check_a_video_row_missing_its_view_count_is_a_parser_failure():
     rows, meta = _with_stubs(engine, fetch_ok, body)
     equal("real payloads: not a parser failure", meta.get("stop_reason"),
           "single_page_route")
+
+
+# The English document, captured 2026-10-16 with `&hl=en&gl=US`, the URL
+# the Scraper API path now requests.
+EN_DOCUMENT_VIEWS = 1827130165
+EN_DOCUMENT_LIKES = 19489367
+FI_DOCUMENT_LIKES = 19489835
+PUBLISHED_AT = "2009-10-24T23:57:33-07:00"
+
+
+def check_the_scraper_api_requests_an_english_page():
+    """Without `hl`, the document came back in the exit's language and the
+    like count (read from an English label) was null. Every accepted URL
+    form is requested as the /watch page with `hl=en&gl=US`."""
+    import argparse
+    import scraper_api_client as sac
+    want = "https://www.youtube.com/watch?v=%s&hl=en&gl=US" % VIDEO_ID
+    for given in ("https://www.youtube.com/watch?v=%s" % VIDEO_ID,
+                  "https://youtu.be/%s" % VIDEO_ID,
+                  "https://www.youtube.com/shorts/%s" % VIDEO_ID,
+                  "https://www.youtube.com/watch?v=%s&hl=fi" % VIDEO_ID):
+        equal("Scraper API requests %s as" % given, sac.request_url(given),
+              want)
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def json(self):
+            return {"http_code": 200, "body": "<html></html>"}
+
+    def _post(url, headers=None, json=None, timeout=None, **_kw):  # noqa: A002
+        captured["payload"] = json
+        return _Resp()
+
+    real_post = sac.requests.post
+    sac.requests.post = _post
+    try:
+        args = argparse.Namespace(url="https://youtu.be/" + VIDEO_ID, key="k",
+                                  timeout=60, cdp_url=None, wait_text=None,
+                                  wait_element=None, wait_state=None)
+        with redirect_stdout(io.StringIO()):
+            sac.fetch_html(args)
+    finally:
+        sac.requests.post = real_post
+    equal("Scraper API: the url actually sent to the service",
+          (captured.get("payload") or {}).get("url"), want)
+
+
+def check_the_english_document_fills_the_player_columns():
+    """Real document, 2026-10-16, `hl=en&gl=US`. The inlined player response
+    carries the upload date, duration, category, keywords and like count
+    that the README used to say this path could not fill."""
+    html = FIX["watch_document_en"]
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, rows = _run_scraper_api_on(html, tmp, "en")
+    row = (rows or [{}])[0]
+    equal("en document: exit", rc, 0)
+    equal("en document: status", meta.get("status"), "complete")
+    equal("en document: stop reason", meta.get("stop_reason"),
+          "single_page_route")
+    equal("en document: sku", row.get("sku"), VIDEO_ID)
+    equal("en document: view_count", row.get("view_count"), EN_DOCUMENT_VIEWS)
+    equal("en document: published_at", row.get("published_at"), PUBLISHED_AT)
+    equal("en document: duration_seconds", row.get("duration_seconds"), 213)
+    equal("en document: category", row.get("category"), "Music")
+    keywords = row.get("keywords") or []
+    equal("en document: keyword count", len(keywords), 27)
+    equal("en document: first keyword", keywords[:1], ["rick astley"])
+    equal("en document: like_count", row.get("like_count"), EN_DOCUMENT_LIKES)
+    equal("en document: the English like label agrees with likeCount",
+          row.get("like_count_text"),
+          "like this video along with 19,489,367 other people")
+    equal("en document: provenance", row.get("data_source"),
+          "innertube.watch+player")
+    equal("en document: nothing incomplete", meta.get("player_incomplete"),
+          None)
+    equal("en document: no column empty", meta.get("player_columns_empty"),
+          None)
+    equal("en document: the sidecar names the URL requested",
+          meta.get("requested_url"),
+          "https://www.youtube.com/watch?v=%s&hl=en&gl=US" % VIDEO_ID)
+    check("en document: the retired 'unreachable' claim is gone",
+          "player_fields_unreachable" not in meta)
+
+
+def check_the_finnish_document_fills_the_player_columns():
+    """The same columns from the localised document; the like count comes
+    from the microformat's digits, since the English label is absent."""
+    html = FIX["watch_document_fi"]
+    data = product_parser.initial_data_from_html(html)
+    bare = product_parser.parse_video(data, scraped_at=SCRAPED_AT,
+                                      row_cls=Video)
+    equal("fi document: no English like label", bare.like_count, None)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, rows = _run_scraper_api_on(html, tmp, "fi")
+    row = (rows or [{}])[0]
+    equal("fi document: exit", rc, 0)
+    equal("fi document: status", meta.get("status"), "complete")
+    equal("fi document: published_at", row.get("published_at"), PUBLISHED_AT)
+    equal("fi document: duration_seconds", row.get("duration_seconds"), 213)
+    equal("fi document: category", row.get("category"), "Music")
+    check("fi document: keywords", bool(row.get("keywords")))
+    equal("fi document: like_count from likeCount", row.get("like_count"),
+          FI_DOCUMENT_LIKES)
+    equal("fi document: view_count", row.get("view_count"),
+          WATCH_DOCUMENT_VIEWS)
+
+
+def _replace_player(html, player):
+    old = product_parser.player_response_from_html(html)
+    new = html.replace(json.dumps(old, ensure_ascii=False),
+                       json.dumps(player, ensure_ascii=False))
+    check("the planted player response really replaced the original",
+          new != html)
+    return new
+
+
+def check_a_player_response_for_another_video_fills_nothing():
+    """Merged only when it names the requested id. A document whose inlined
+    player response is about another video, or has none, leaves the player
+    columns null and the run partial (exit 6), never complete."""
+    html = FIX["watch_document_en"]
+    player = product_parser.player_response_from_html(html)
+    other = copy.deepcopy(player)
+    other["videoDetails"]["videoId"] = "xxxxxxxxxxx"
+    micro_other = copy.deepcopy(player)
+    micro_other["microformat"]["playerMicroformatRenderer"][
+        "externalVideoId"] = "xxxxxxxxxxx"
+    nameless = copy.deepcopy(player)
+    nameless["videoDetails"].pop("videoId", None)
+    gone = html.replace("var ytInitialPlayerResponse = ", "var notIt = ")
+    cases = (("another video", _replace_player(html, other),
+              "inline_player_response_for_another_video"),
+             ("microformat for another video",
+              _replace_player(html, micro_other),
+              "inline_player_response_for_another_video"),
+             ("no video id", _replace_player(html, nameless),
+              "inline_player_response_for_another_video"),
+             ("absent", gone, "inline_player_response_absent"))
+    with tempfile.TemporaryDirectory() as tmp:
+        for label, doc, reason in cases:
+            rc, meta, rows = _run_scraper_api_on(doc, tmp, label[:5])
+            row = (rows or [{}])[0]
+            equal("player %s: exit" % label, rc, output_writer.EXIT_PARTIAL)
+            equal("player %s: status" % label, meta.get("status"), "partial")
+            equal("player %s: stop reason" % label, meta.get("stop_reason"),
+                  "player_incomplete")
+            equal("player %s: reason" % label,
+                  meta.get("player_incomplete"), reason)
+            for name in ("published_at", "duration_seconds", "category",
+                         "keywords"):
+                equal("player %s: %s is null" % (label, name),
+                      row.get(name), None)
+            equal("player %s: provenance" % label, row.get("data_source"),
+                  "innertube.watch")
+            # The English label still states the likes, and the rendered
+            # text the views: those come from ytInitialData, not the player.
+            equal("player %s: like_count from the label" % label,
+                  row.get("like_count"), EN_DOCUMENT_LIKES)
+            equal("player %s: view_count from the text" % label,
+                  row.get("view_count"), EN_DOCUMENT_VIEWS)
+    equal("exact_like_count refuses another video",
+          product_parser.exact_like_count(other, VIDEO_ID), None)
+
+
+def check_a_column_the_player_response_omits_stays_null():
+    """A video with no keywords is a fact about the video, not a fault: the
+    run stays complete and the sidecar names the empty column. A missing
+    likeCount falls back to the label; with neither, like_count is null,
+    never zero."""
+    html = FIX["watch_document_en"]
+    player = product_parser.player_response_from_html(html)
+    bare = copy.deepcopy(player)
+    bare["videoDetails"].pop("keywords", None)
+    bare["microformat"]["playerMicroformatRenderer"].pop("likeCount", None)
+    doc = _replace_player(html, bare)
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, rows = _run_scraper_api_on(doc, tmp, "nokw")
+        row = (rows or [{}])[0]
+        equal("no keywords: exit", rc, 0)
+        equal("no keywords: status", meta.get("status"), "complete")
+        equal("no keywords: keywords", row.get("keywords"), None)
+        equal("no keywords: the sidecar names it",
+              meta.get("player_columns_empty"), ["keywords"])
+        equal("no likeCount: like_count from the English label",
+              row.get("like_count"), EN_DOCUMENT_LIKES)
+        no_label = doc.replace("like this video along with",
+                               "gefaellt das Video zusammen mit")
+        check("the planted document really lost the English label",
+              no_label != doc)
+        rc, meta, rows = _run_scraper_api_on(no_label, tmp, "nolike")
+        equal("no like source: like_count is null",
+              (rows or [{}])[0].get("like_count"), None)
 
 
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")
