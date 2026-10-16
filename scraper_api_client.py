@@ -67,7 +67,9 @@ from typing import Optional
 import requests
 
 from product_parser import (client_version_from_text, detect_bot_challenge,
-                            is_supported_url, parse_video,
+                            exact_view_count, initial_data_from_html,
+                            is_supported_url, missing_core_fields,
+                            parse_video, player_response_from_html,
                             video_id_from_url)
 from output_writer import Video, finish_run, utc_now
 import env_config
@@ -315,6 +317,27 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                      "of it — saved to %s.", dump)
         return 1
 
+    # The exact count, from the document's own inlined player response:
+    # a bare digit string in every locale. The rendered text in
+    # `ytInitialData` is in the exit's language ("1.827.082.109 Aufrufe"),
+    # and on 2026-10-16 that is how this path wrote a row with no view
+    # count and called the run complete. Only `viewCount` is taken from it.
+    exact = exact_view_count(player_response_from_html(html), row.sku)
+    if exact is not None:
+        row.view_count = exact
+
+    missing = missing_core_fields(row)
+    if missing:
+        # The page was served and states these; losing them is OUR parser
+        # failing, so the run is partial (exit 6), never complete. The row
+        # is still written — it is real — and the sidecar names the gap.
+        dump = f"{args.out}_scraperapi_debug.html"
+        with open(dump, "w", encoding="utf-8") as handle:
+            handle.write(html)
+        logger.error("The served watch page parsed without %s — saved to "
+                     "%s. That is a parser failure, not a complete run.",
+                     ", ".join(missing), dump)
+
     # What the document does NOT carry, said once, so nobody concludes the
     # columns are broken. `/player` is a POST and this service issues a GET,
     # so the exact upload date, the duration and the category are simply
@@ -346,7 +369,8 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
     # is, instead of letting a reader infer a fault from a null.
     return finish_run([row], args.out, args.format,
                       allow_empty=args.allow_empty, blocked=False,
-                      stop_reason="single_page_route",
+                      stop_reason=("parse_error" if missing
+                                   else "single_page_route"),
                       pages_requested=1, pages_completed=1,
                       start_url=args.url, final_url=args.url,
                       mode="video", extra={
@@ -355,6 +379,7 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                           "player_fields_unreachable": list(
                               PLAYER_ONLY_FIELDS),
                           "upstream_status": upstream_status,
+                          "fields_unparsed": missing or None,
                       })
 
 
@@ -365,31 +390,14 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
 PLAYER_ONLY_FIELDS = ("published_at", "duration_seconds", "category",
                       "keywords")
 
-_INITIAL_DATA_MARKERS = ("var ytInitialData = ", "window[\"ytInitialData\"] = ",
-                         "ytInitialData = ")
-
-
 def _initial_data(html: str):
     """The watch page's inlined state, or None.
 
     Matched on the assignment rather than on the bare name: the string
-    `ytInitialData` also appears inside unrelated script text, and anchoring
-    on the assignment is what stops a partial match from being decoded as a
-    payload.
+    `ytInitialData` also appears inside unrelated script text. Decoded to
+    the object's own end, not cut at the first `};`.
     """
-    for marker in _INITIAL_DATA_MARKERS:
-        start = html.find(marker)
-        if start < 0:
-            continue
-        start += len(marker)
-        end = html.find("};", start)
-        if end < 0:
-            continue
-        try:
-            return json.loads(html[start:end + 1])
-        except ValueError:
-            continue
-    return None
+    return initial_data_from_html(html)
 
 
 def parse_args():

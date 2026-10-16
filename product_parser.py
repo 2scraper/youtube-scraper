@@ -457,6 +457,116 @@ def _looks_like_unit_word(tail: str) -> bool:
     return any(low.startswith(w) for w in _UNIT_WORDS)
 
 
+# A FULL count in any locale's grouping: "1,827,082,109", "1.827.082.109",
+# "1 827 082 109" (NBSP / narrow NBSP / thin space), "1'827'082'109", and
+# the lakh form "1,82,70,82,109". No decimal and no suffix: only for the
+# fields that state the whole number (`viewCount`, never `shortViewCount`).
+_FULL_COUNT_RE = re.compile(
+    r"(?<![\d.,])(\d{1,3}(?:([,.    '])\d{3})+|\d+)"
+    r"(?![\d]|[.,]\d)")
+_LAKH_RE = re.compile(r"(?<![\d.,])(\d{1,2}(?:,\d{2})+,\d{3})(?![\d]|[.,]\d)")
+
+
+def parse_full_count(text: Optional[str]) -> Optional[int]:
+    """"1 827 082 109 katselukertaa" -> 1827082109, "1,8 Mrd." -> None.
+
+    `parse_count` refuses any number followed by a word it does not know,
+    which is right for an abbreviation ("318 тыс.") and wrong for a full
+    count: the watch document is rendered in the exit's language, so a
+    Scraper API fetch from a non-English exit wrote "1.827.082.109 Aufrufe"
+    and the row went out with no view count (canary, 2026-10-16). The
+    word after a FULL count carries no magnitude, so it can be ignored.
+    """
+    if text is None:
+        return None
+    if isinstance(text, (int, float)) and not isinstance(text, bool):
+        return int(text)
+    raw = str(text)
+    m = _LAKH_RE.search(raw) or _FULL_COUNT_RE.search(raw)
+    if not m:
+        return None
+    return int(re.sub(r"\D", "", m.group(1)))
+
+
+def _json_after(text: str, marker: str) -> Optional[dict]:
+    """The JSON object assigned right after `marker`, or None.
+
+    Decoded with `raw_decode`, which stops at the object's own end, rather
+    than cut at the first `};`: a description or title holding `};` would
+    otherwise be cut mid-string.
+    """
+    start = text.find(marker)
+    while start >= 0:
+        try:
+            value, _ = json.JSONDecoder().raw_decode(text, start + len(marker))
+        except ValueError:
+            value = None
+        if isinstance(value, dict):
+            return value
+        start = text.find(marker, start + len(marker))
+    return None
+
+
+_INITIAL_DATA_MARKERS = ("var ytInitialData = ", 'window["ytInitialData"] = ',
+                         "ytInitialData = ")
+_PLAYER_RESPONSE_MARKERS = ("var ytInitialPlayerResponse = ",
+                            'window["ytInitialPlayerResponse"] = ',
+                            "ytInitialPlayerResponse = ")
+
+
+def initial_data_from_html(html: Optional[str]) -> Optional[dict]:
+    """A watch document's inlined `ytInitialData` (the `/next` shape)."""
+    for marker in _INITIAL_DATA_MARKERS:
+        found = _json_after(html or "", marker)
+        if found is not None:
+            return found
+    return None
+
+
+def player_response_from_html(html: Optional[str]) -> Optional[dict]:
+    """A watch document's inlined `ytInitialPlayerResponse` (the `/player`
+    shape). Its `videoDetails.viewCount` is a bare digit string in every
+    locale, unlike the rendered text in `ytInitialData`."""
+    for marker in _PLAYER_RESPONSE_MARKERS:
+        found = _json_after(html or "", marker)
+        if found is not None:
+            return found
+    return None
+
+
+def exact_view_count(player: Any, video_id: Optional[str] = None
+                     ) -> Optional[int]:
+    """`videoDetails.viewCount` (or the microformat's) as an int, or None.
+
+    When `video_id` is given the payload must be about that video, so a
+    player response for some other video cannot fill this row.
+    """
+    if not isinstance(player, dict):
+        return None
+    details = player.get("videoDetails") or {}
+    micro = (player.get("microformat") or {}).get(
+        "playerMicroformatRenderer") or {}
+    if video_id and details.get("videoId") not in (None, video_id):
+        return None
+    for value in (details.get("viewCount"), micro.get("viewCount")):
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+# The columns a served watch page always states. A row without one of them
+# is a parser failure, not a complete run: the page had it, we lost it.
+VIDEO_CORE_FIELDS = ("video_id", "title", "view_count")
+
+
+def missing_core_fields(row: Any) -> List[str]:
+    """Names of the core video columns this row came out without."""
+    return [name for name in VIDEO_CORE_FIELDS
+            if getattr(row, name, None) in (None, "")]
+
+
 # ---------------------------------------------------------------------------
 # Relative time
 # ---------------------------------------------------------------------------
@@ -1348,7 +1458,9 @@ def parse_video(payload: Any, *, video_id: Optional[str] = None,
         channel_url=_channel_url(browse.get("canonicalBaseUrl")),
         subscriber_count_text=_text(owner.get("subscriberCountText")),
         subscriber_count=parse_count(_text(owner.get("subscriberCountText"))),
-        view_count=parse_count(view_text),
+        # The FULL text, read in any locale's grouping: the watch document
+        # is rendered in the exit's language, not forced to English.
+        view_count=(parse_full_count(view_text) if view_text else None),
         view_count_text=view_text or short_view_text,
         like_count=like_count,
         like_count_text=(like_labels[0] if like_labels else None),
@@ -1422,11 +1534,9 @@ def apply_player(payload: Any, row: Any) -> Any:
         row.is_live = bool(details["isLiveContent"])
     # `/player` states the view count exactly too, and states it LATER than
     # the watch payload did — so it is preferred when both are present.
-    exact_views = details.get("viewCount") or micro.get("viewCount")
-    if exact_views:
-        parsed = parse_count(exact_views)
-        if parsed is not None:
-            row.view_count = parsed
+    exact_views = exact_view_count(payload, getattr(row, "video_id", None))
+    if exact_views is not None:
+        row.view_count = exact_views
     if not row.title and details.get("title"):
         row.title = details["title"]
     if not row.channel_name and details.get("author"):

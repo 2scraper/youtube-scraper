@@ -3693,6 +3693,192 @@ def check_no_public_file_cites_private_instruction_files():
           "numbers", hits[:10], [])
 
 
+# ---------------------------------------------------------------------------
+# 2026-10-16: a watch document in the exit's language lost the view count
+# ---------------------------------------------------------------------------
+
+WATCH_DOCUMENT_VIEWS = 1827082109
+
+
+def _without_view_count(node):
+    """A deep copy with every view-count source removed."""
+    if isinstance(node, dict):
+        return {k: _without_view_count(v) for k, v in node.items()
+                if k not in ("videoViewCountRenderer", "viewCount")}
+    if isinstance(node, list):
+        return [_without_view_count(v) for v in node]
+    return node
+
+
+def check_full_counts_read_in_any_locale():
+    """`viewCount` is the FULL number in the page's language; the word after
+    it carries no magnitude. An abbreviation must still be refused."""
+    for text, want in (
+            ("1,827,082,109 views", WATCH_DOCUMENT_VIEWS),
+            ("1.827.082.109 Aufrufe", WATCH_DOCUMENT_VIEWS),
+            ("1 827 082 109 vues", WATCH_DOCUMENT_VIEWS),
+            ("1 827 082 109 katselukertaa", WATCH_DOCUMENT_VIEWS),
+            ("1,827,082,109回視聴", WATCH_DOCUMENT_VIEWS),
+            ("1,82,70,82,109 बार देखा गया", WATCH_DOCUMENT_VIEWS),
+            ("12 watching now", 12),
+            ("1.8B views", None), ("1,8 Mrd. Aufrufe", None),
+            ("No views", None), ("", None), (None, None)):
+        equal("parse_full_count(%r)" % (text,),
+              product_parser.parse_full_count(text), want)
+
+
+def check_a_localised_watch_document_yields_the_exact_view_count():
+    """Real document, 2026-10-16, fetched without `hl=` from a Finnish exit.
+
+    Before the fix the parser read "1 827 082 109 katselukertaa" with
+    `parse_count`, which refuses any number followed by a word it does not
+    know, and the Scraper API path wrote the row with no view count.
+    """
+    html = FIX["watch_document_fi"]
+    data = product_parser.initial_data_from_html(html)
+    row = product_parser.parse_video(data, scraped_at=SCRAPED_AT,
+                                     row_cls=Video)
+    check("the document parses to a row", row is not None)
+    if row is None:
+        return
+    equal("fi document: sku", row.sku, VIDEO_ID)
+    equal("fi document: title", row.title, VIDEO_TITLE)
+    equal("fi document: channel", row.channel_name, "Rick Astley")
+    equal("fi document: view count from the localised text", row.view_count,
+          WATCH_DOCUMENT_VIEWS)
+    equal("fi document: and what was written", row.view_count_text,
+          "1 827 082 109 katselukertaa")
+    equal("fi document: a localised abbreviation is still refused",
+          row.comment_count, None)
+    equal("fi document: comments enabled", row.comments_enabled, True)
+    player = product_parser.player_response_from_html(html)
+    equal("fi document: exact view count from the inline player response",
+          product_parser.exact_view_count(player, VIDEO_ID),
+          WATCH_DOCUMENT_VIEWS)
+    equal("an inline player response for ANOTHER video is not used",
+          product_parser.exact_view_count(player, "xxxxxxxxxxx"), None)
+    equal("fi document: client version",
+          product_parser.client_version_from_text(html), "2.20261015.01.00")
+    equal("fi document: classified as content",
+          product_parser.detect_page_state(data), product_parser.STATE_CONTENT)
+    equal("fi document: no core field missing",
+          product_parser.missing_core_fields(row), [])
+
+
+def _run_scraper_api_on(html, tmp, name):
+    import scraper_api_client as sac
+    args = types.SimpleNamespace(
+        url="https://www.youtube.com/watch?v=" + VIDEO_ID, key="unused",
+        out=os.path.join(tmp, name), format="json", allow_empty=False,
+        category=VIDEO_ID, dump_html=None, timeout=60, cdp_url=None,
+        wait_text=None, wait_element=None, wait_state=None)
+    real = sac.fetch_html
+    sac.fetch_html = lambda _args: (html, 200)
+    try:
+        with redirect_stdout(io.StringIO()):
+            rc = sac._run_once(args)
+    finally:
+        sac.fetch_html = real
+    meta_path = args.out + ".meta.json"
+    meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
+    rows = json.load(open(args.out + ".json")) \
+        if os.path.exists(args.out + ".json") else []
+    return rc, meta, rows
+
+
+def check_the_scraper_api_path_reads_a_localised_document():
+    """The canary's failure, offline: http_code 200, one row, exit 0 and
+    `status: complete` with `view_count` empty. Driven through the real
+    `_run_once` with only the HTTP call stubbed (no network, no key)."""
+    html = FIX["watch_document_fi"]
+    with tempfile.TemporaryDirectory() as tmp:
+        rc, meta, rows = _run_scraper_api_on(html, tmp, "ok")
+        equal("Scraper API, fi document: exit", rc, 0)
+        equal("Scraper API, fi document: status", meta.get("status"),
+              "complete")
+        equal("Scraper API, fi document: view_count",
+              (rows or [{}])[0].get("view_count"), WATCH_DOCUMENT_VIEWS)
+
+        # Only the inline player response states it: still read.
+        data = product_parser.initial_data_from_html(html)
+        player = product_parser.player_response_from_html(html)
+        no_text = html.replace(
+            json.dumps(data, ensure_ascii=False),
+            json.dumps(_without_view_count(data), ensure_ascii=False))
+        check("the planted document really lost the rendered count",
+              no_text != html)
+        rc, meta, rows = _run_scraper_api_on(no_text, tmp, "player_only")
+        equal("Scraper API, count only in the player response: exit", rc, 0)
+        equal("Scraper API, count only in the player response: view_count",
+              (rows or [{}])[0].get("view_count"), WATCH_DOCUMENT_VIEWS)
+
+        # Neither source: a served page that lost a core field is a parser
+        # failure, so the run is partial (exit 6), never complete.
+        neither = no_text.replace(
+            json.dumps(player, ensure_ascii=False),
+            json.dumps(_without_view_count(player), ensure_ascii=False))
+        check("the planted document really lost the player count",
+              neither != no_text)
+        rc, meta, rows = _run_scraper_api_on(neither, tmp, "neither")
+        equal("Scraper API, no view count: exit (rows, run incomplete)",
+              rc, output_writer.EXIT_PARTIAL)
+        equal("Scraper API, no view count: status", meta.get("status"),
+              "partial")
+        equal("Scraper API, no view count: stop reason",
+              meta.get("stop_reason"), "parse_error")
+        equal("Scraper API, no view count: the sidecar names the field",
+              meta.get("fields_unparsed"), ["view_count"])
+        equal("Scraper API, no view count: the real row is still written",
+              len(rows), 1)
+
+
+def check_a_video_row_missing_its_view_count_is_a_parser_failure():
+    """The browser and HTTP engines: a served watch payload that parses
+    without a view count, and a /player answer that states none, must not
+    end `complete`."""
+    engine = _import_engine("run_core")
+    if engine is None:
+        skip("run_core", "unreachable: run_core needs no driver")
+        return
+    watch = _without_view_count(FIX["watch"])
+    player = _without_view_count(FIX["player"])
+
+    def fetch(box, pw, args, pool, body, endpoint, label):
+        return 200, (player if endpoint == "player" else watch), \
+            product_parser.STATE_CONTENT, False
+
+    def body(FakeSession):
+        args = _fault_args(engine, mode="video", pages=1)
+        box = {"session": FakeSession(), "prime_url": "u"}
+        return engine._run_video(box, None, args, pool=None)
+
+    rows, meta = _with_stubs(engine, fetch, body)
+    equal("the row is still written", len(rows), 1)
+    equal("view_count is null", rows[0].view_count if rows else 0, None)
+    equal("the run names a parser failure", meta.get("stop_reason"),
+          "parse_error")
+    entry = (meta.get("videos_unparsed") or [{}])[0]
+    equal("the sidecar names the video and the field",
+          (entry.get("video_id"), entry.get("fields")),
+          (VIDEO_ID, ["view_count"]))
+    with tempfile.TemporaryDirectory() as tmp:
+        with redirect_stdout(io.StringIO()):
+            rc = output_writer.finish_run(
+                rows, os.path.join(tmp, "v"), "json", False, blocked=False,
+                stop_reason=meta["stop_reason"], pages_requested=1,
+                pages_completed=1, start_url="u", final_url="u",
+                mode="video")
+    equal("a lost view count exits 6, not 0", rc, output_writer.EXIT_PARTIAL)
+
+    # And the control: the real payloads are complete.
+    def fetch_ok(box, pw, args, pool, body, endpoint, label):
+        return 200, (FIX["player"] if endpoint == "player"
+                     else FIX["watch"]), product_parser.STATE_CONTENT, False
+    rows, meta = _with_stubs(engine, fetch_ok, body)
+    equal("real payloads: not a parser failure", meta.get("stop_reason"),
+          "single_page_route")
+
+
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")
           and callable(v) and k != "check"]
 

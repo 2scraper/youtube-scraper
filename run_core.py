@@ -130,6 +130,9 @@ class PageOutcome:
     # Which of the /player-only columns the SITE left empty on a row whose
     # /player call DID answer. Information for the sidecar, never a fault.
     player_fields_empty: List[str] = field(default_factory=list)
+    # Core video columns a SERVED watch page states and the parser lost.
+    # A fault, unlike the field above: the run is a parser failure.
+    fields_missing: List[str] = field(default_factory=list)
     payload: Optional[Any] = None
     attempted: bool = True
 
@@ -875,6 +878,11 @@ def _fetch_one_video(session_box, pw, args, pool, video_id: str,
              if getattr(row, name, None) in (None, "", [])]
     row.data_source = ("innertube.watch+player" if player_answered
                        else "innertube.watch")
+    missing = parser.missing_core_fields(row)
+    if missing:
+        logger.error("%s: the served watch page parsed without %s. That is "
+                     "a parser failure, so the run is not complete.",
+                     video_id, ", ".join(missing))
     if not player_answered:
         # Name WHY, which is now possible: since the classifier reads
         # `playabilityStatus` structurally, `state2` says "challenge",
@@ -887,7 +895,7 @@ def _fetch_one_video(session_box, pw, args, pool, video_id: str,
                        ", ".join(PLAYER_ONLY_FIELDS), "are")
         return PageOutcome(number=number, video_id=video_id, rows=[row],
                            state=parser.STATE_CONTENT, status=status,
-                           blocked=blocked,
+                           blocked=blocked, fields_missing=missing,
                            error="player_unanswered: %s" % state2)
     if empty:
         # The source answered and the site published nothing for these.
@@ -896,7 +904,8 @@ def _fetch_one_video(session_box, pw, args, pool, video_id: str,
                     video_id, ", ".join(empty))
     return PageOutcome(number=number, video_id=video_id, rows=[row],
                        state=parser.STATE_CONTENT, status=status,
-                       blocked=blocked, player_fields_empty=empty)
+                       blocked=blocked, player_fields_empty=empty,
+                       fields_missing=missing)
 
 def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
     ids = _video_ids(args)
@@ -952,7 +961,14 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
     # tell "YouTube has no category for this video" from "we never asked".
     empty_columns = sorted({name for o in outcomes
                             for name in o.player_fields_empty})
-    if incomplete:
+    # A row the parser lost a core column of. Checked FIRST: it is our
+    # fault, and a reader must not see it folded into a source gap.
+    unparsed = [{"video_id": o.video_id, "number": o.number,
+                 "fields": list(o.fields_missing)}
+                for o in outcomes if o.rows and o.fields_missing]
+    if unparsed:
+        stop_reason = "parse_error"
+    elif incomplete:
         stop_reason = "player_incomplete"
     elif len(ids) == 1 and rows:
         stop_reason = "single_page_route"
@@ -964,6 +980,7 @@ def _run_video(session_box, pw, args, pool) -> Tuple[List[Any], Dict[str, Any]]:
                   "video_ids": list(ids),
                   "videos_failed": failed_videos or None,
                   "videos_incomplete": incomplete or None,
+                  "videos_unparsed": unparsed or None,
                   "player_columns_empty": empty_columns or None,
                   "client_version": session_box["session"].client_version}
 
