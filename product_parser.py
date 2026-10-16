@@ -237,6 +237,13 @@ def canonical_video_url(video_id: str) -> str:
     return f"{INNERTUBE_ORIGIN}/watch?v={video_id}"
 
 
+def localised_watch_url(video_id: str, locale: str = DEFAULT_LOCALE,
+                        region: str = DEFAULT_REGION) -> str:
+    """The watch URL with `hl`/`gl` pinned, so the document's rendered text
+    is in a known language whatever the fetching exit's country is."""
+    return f"{canonical_video_url(video_id)}&hl={locale}&gl={region}"
+
+
 def comment_permalink(video_id: str, comment_id: str) -> str:
     """The site's own deep link to one comment.
 
@@ -553,6 +560,46 @@ def exact_view_count(player: Any, video_id: Optional[str] = None
             return int(value.strip())
         if isinstance(value, int) and not isinstance(value, bool):
             return value
+    return None
+
+
+def player_is_about(player: Any, video_id: Optional[str]) -> bool:
+    """True only when a player response names `video_id` itself.
+
+    Stricter than `exact_view_count`: `videoDetails.videoId` must be
+    present and equal, and the microformat's `externalVideoId`, when it is
+    there, must agree. A whole set of columns is merged on this answer, so
+    a payload that does not say which video it describes fills nothing.
+    """
+    if not video_id or not isinstance(player, dict):
+        return False
+    details = player.get("videoDetails") or {}
+    micro = (player.get("microformat") or {}).get(
+        "playerMicroformatRenderer") or {}
+    if details.get("videoId") != video_id:
+        return False
+    return micro.get("externalVideoId") in (None, video_id)
+
+
+def exact_like_count(player: Any, video_id: Optional[str] = None
+                     ) -> Optional[int]:
+    """The microformat's `likeCount` (a bare digit string) as an int.
+
+    None when absent, when it is not digits, or when the payload is about
+    another video. Present in both watch documents captured 2026-10-16
+    (Finnish and English); absent is null, never zero.
+    """
+    if video_id is not None and not player_is_about(player, video_id):
+        return None
+    if not isinstance(player, dict):
+        return None
+    micro = (player.get("microformat") or {}).get(
+        "playerMicroformatRenderer") or {}
+    value = micro.get("likeCount")
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
     return None
 
 

@@ -19,7 +19,29 @@ rather than leaving it to be discovered from a bill or a chart.
 > the sidecar names the field (`videos_unparsed`, or `fields_unparsed` on
 > the Scraper API path).
 
+> **The Scraper API path now fills the upload date, duration, category and
+> keywords, and requests an English page.** It fetches
+> `/watch?v=<id>&hl=en&gl=US` instead of the URL as given, and reads
+> `published_at`, `duration_seconds`, `category`, `keywords` and an exact
+> `like_count` from the player data the document inlines — only when that
+> data names the requested video id. These columns used to be null by
+> design on this path; a document without usable player data now ends
+> `partial` (exit `6`, `stop_reason: player_incomplete`). The sidecar's
+> `player_fields_unreachable` is replaced by `player_incomplete`,
+> `player_columns_empty` and `requested_url`.
+
+### Added
+
+- `--mode video` through `scraper_api_client.py` reads the inlined player
+  response the way the browser engines read `/player`. `like_count` is
+  filled on non-English pages too, from the microformat's `likeCount`
+  digits. Two real documents (Finnish, English; 2026-10-16) back the
+  offline checks.
+
 ### Fixed
+
+- The Finnish watch-document fixture carried the capturing machine's IP
+  address inside a signed playback URL; the trimmer now drops that subtree.
 
 - **The Scraper API path lost the view count on any non-English page.** The
   watch document comes back in the language of the service's exit, and the
