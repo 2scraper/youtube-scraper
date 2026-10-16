@@ -61,6 +61,12 @@ rather than leaving it to be discovered from a bill or a chart.
 - The inlined `ytInitialData` is decoded to the end of its own object
   rather than cut at the first `};`.
 
+### Changed
+
+- CI only: the canary's paid `scraper-api` job now runs weekly (Mondays 06:17
+  UTC) and on a manual dispatch; the free `core-only`, `comments` and `video`
+  jobs still run daily.
+
 ## [0.4.0] — 2026-10-15
 
 > **Output files now honour your umask.** Every `<out>.json`, `<out>.csv`
