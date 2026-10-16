@@ -88,7 +88,7 @@ SOURCES = {
     "search": ("search_en.json", 5),
 }
 
-# HTML rather than a payload, and the only one. It is a page YouTube
+# HTML rather than a payload. It is a page YouTube
 # SERVED, fetched over the 2Captcha Scraping Browser, trimmed to the tags
 # that browser's auto-solve EXTENSION injected into it.
 #
@@ -98,6 +98,101 @@ SOURCES = {
 # that way. This one is fetched the way a `--cdp-endpoint` run fetches,
 # which is the only place the trap can appear.
 HTML_SOURCES = {"cdp_served_watch": "cdp_served_watch.html"}
+
+# A whole watch DOCUMENT, the shape the Scraper API path reads, cut down to
+# the two inlined objects it parses. Taken WITHOUT `hl=`, so it is in the
+# exit's language: on 2026-10-16 a non-English document is what made the
+# Scraper API path write a row with no view count. Captured that day with
+# plain curl and a browser User-Agent from a Finnish address (hl=fi).
+WATCH_DOCUMENT_SOURCES = {"watch_document_fi": "watch_document_fi.html"}
+
+# Opaque per-response tokens: no value to a parser test, and not ours to
+# republish.
+_DOCUMENT_DROP_KEYS = ("trackingParams", "clickTrackingParams",
+                       "loggingDirectives", "visitorData", "responseContext",
+                       "serializedShareEntity", "adPlacements",
+                       "playerAds", "streamingData", "playbackTracking",
+                       "storyboards", "attestation", "heartbeatParams",
+                       "frameworkUpdates")
+
+
+def _drop_keys(node):
+    if isinstance(node, dict):
+        return {k: _drop_keys(v) for k, v in node.items()
+                if k not in _DOCUMENT_DROP_KEYS}
+    if isinstance(node, list):
+        return [_drop_keys(v) for v in node]
+    return node
+
+
+def _replace_tokens(node, counter):
+    """Continuation tokens -> "FIXTURE_TOKEN_N", in place."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "token" and isinstance(value, str):
+                counter[0] += 1
+                node[key] = "FIXTURE_TOKEN_%d" % counter[0]
+            else:
+                _replace_tokens(value, counter)
+    elif isinstance(node, list):
+        for value in node:
+            _replace_tokens(value, counter)
+
+
+def trim_watch_document(html: str) -> str:
+    """A watch document -> a small HTML page holding only what the Scraper
+    API path reads: the title, the client version, and the primary and
+    secondary info renderers (`ytInitialData`) plus `videoDetails` and the
+    microformat (`ytInitialPlayerResponse`). Values are verbatim; only
+    whole subtrees are dropped. The comment section is not kept: it holds
+    no comment in a document anyway, only a continuation token."""
+    data = parser.initial_data_from_html(html)
+    player = parser.player_response_from_html(html)
+    if data is None or player is None:
+        raise SystemExit("not a watch document: ytInitialData or "
+                         "ytInitialPlayerResponse is missing")
+    results = (((data.get("contents") or {}).get("twoColumnWatchNextResults")
+                or {}).get("results") or {}).get("results") or {}
+    keep = [item for item in results.get("contents") or []
+            if "videoPrimaryInfoRenderer" in item
+            or "videoSecondaryInfoRenderer" in item
+            or ((item.get("itemSectionRenderer") or {}).get(
+                "sectionIdentifier") == parser.COMMENT_SECTION_ID)]
+    panels = []
+    for panel in data.get("engagementPanels") or []:
+        inner = panel.get("engagementPanelSectionListRenderer") or {}
+        ident = inner.get("panelIdentifier") or inner.get("targetId") or ""
+        if "comment" in str(ident).lower():
+            panels.append({"engagementPanelSectionListRenderer": {
+                "panelIdentifier": ident, "header": inner.get("header")}})
+    small_data = _drop_keys({
+        "contents": {"twoColumnWatchNextResults": {"results": {"results": {
+            "contents": keep}}}},
+        "currentVideoEndpoint": data.get("currentVideoEndpoint"),
+        "engagementPanels": panels})
+    _replace_tokens(small_data, [0])
+    details = dict(player.get("videoDetails") or {})
+    details.pop("thumbnail", None)
+    micro = dict((player.get("microformat") or {}).get(
+        "playerMicroformatRenderer") or {})
+    for key in ("thumbnail", "embed", "availableCountries"):
+        micro.pop(key, None)
+    small_player = _drop_keys({
+        "playabilityStatus": {"status": (player.get("playabilityStatus")
+                                         or {}).get("status")},
+        "videoDetails": details,
+        "microformat": {"playerMicroformatRenderer": micro}})
+    version = parser.client_version_from_text(html)
+    title = re.search(r"<title>([^<]*)</title>", html)
+    return ("<!DOCTYPE html><html><head><title>%s</title>\n"
+            "<script>ytcfg.set({\"INNERTUBE_CLIENT_VERSION\":\"%s\"});</script>\n"
+            "</head><body>\n"
+            "<script>var ytInitialPlayerResponse = %s;</script>\n"
+            "<script>var ytInitialData = %s;</script>\n"
+            "</body></html>\n" % (
+                title.group(1) if title else "", version or "",
+                json.dumps(small_player, ensure_ascii=False),
+                json.dumps(small_data, ensure_ascii=False)))
 
 # Columns this script deliberately rewrites. The parse-identity check below
 # compares every OTHER column between the original and the fixture, so this
@@ -613,6 +708,20 @@ def _verify_scrubbed(name, trimmed, fixture, kind):
                     f"{getattr(row, field)!r}")
 
 
+def _verify_document(name, original_html, trimmed_html):
+    """The trimmed document parses to the SAME video row as the original."""
+    rows = []
+    for html in (original_html, trimmed_html):
+        row = parser.parse_video(parser.initial_data_from_html(html),
+                                 row_cls=Video)
+        if row is None:
+            raise SystemExit(f"{name}: no video row")
+        rows.append((vars(row), parser.exact_view_count(
+            parser.player_response_from_html(html), row.sku)))
+    if rows[0] != rows[1]:
+        raise SystemExit(f"{name}: trimmed document parses differently")
+
+
 def main() -> int:
     captures = _find_captures()
     out = {}
@@ -654,6 +763,21 @@ def main() -> int:
         out[name] = html
         print(f"  {name:22} {len(html):8,} bytes, "
               f"{html.count('chrome-extension://'):2} injected tag(s)")
+
+    for name, filename in WATCH_DOCUMENT_SOURCES.items():
+        path = captures / filename
+        if not path.is_file():
+            print(f"  SKIP {name}: {path} not found")
+            continue
+        original = path.read_text(encoding="utf-8")
+        html = trim_watch_document(original)
+        for leak in ('"commentId"', '"displayName"', '"visitorData"',
+                     "ggpht.com/ytc"):
+            if leak in html:
+                raise SystemExit(f"{name}: carries {leak!r} — re-trim it")
+        _verify_document(name, original, html)
+        out[name] = html
+        print(f"  {name:22} {len(html):8,} bytes, video row verified identical")
 
     target = pathlib.Path(__file__).resolve().parent / "fixtures_generated.json"
     target.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")

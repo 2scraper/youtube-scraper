@@ -11,6 +11,30 @@ rather than leaving it to be discovered from a bill or a chart.
 
 ## [Unreleased]
 
+> **A video row without its view count is now a parser failure.** A
+> `--mode video` row (any engine, and the Scraper API path) that comes out
+> of a served watch page without `video_id`, `title` or `view_count` used
+> to end `complete` with exit `0`; it now ends `partial` with
+> `stop_reason: parse_error` and exit `6`. The row is still written, and
+> the sidecar names the field (`videos_unparsed`, or `fields_unparsed` on
+> the Scraper API path).
+
+### Fixed
+
+- **The Scraper API path lost the view count on any non-English page.** The
+  watch document comes back in the language of the service's exit, and the
+  view count was read from the rendered text ("1.827.082.109 Aufrufe",
+  "1 827 082 109 katselukertaa"), which the count parser refuses when a
+  word it does not know follows the number. The 2026-10-16 canary got an
+  HTTP 200 page, wrote one row with no `view_count`, and reported it
+  complete. The count is now taken from the document's own inlined player
+  response (`videoDetails.viewCount`, digits in every locale), and the
+  rendered text is read in any locale's digit grouping as the fallback.
+  The same fallback applies to `--locale` runs on the other engines, where
+  `/player` already supplied the number.
+- The inlined `ytInitialData` is decoded to the end of its own object
+  rather than cut at the first `};`.
+
 ## [0.4.0] — 2026-10-15
 
 > **Output files now honour your umask.** Every `<out>.json`, `<out>.csv`

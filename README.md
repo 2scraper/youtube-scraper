@@ -228,7 +228,11 @@ comments · `5` the content was never obtained · `6` partial.
 **A served page that parses to nothing is a parser failure, not "no
 comments".** It is recorded as `stop_reason: parse_error` with the page in
 `pages_failed`: exit `5` on the first page, exit `6` after rows were
-gathered.
+gathered. A video row that comes out of a served watch page without its
+`video_id`, `title` or `view_count` is the same failure: the row is
+written, the run is `partial` with `stop_reason: parse_error`, exit `6`,
+and the sidecar names the field (`videos_unparsed` on the browser and HTTP
+engines, `fields_unparsed` on the Scraper API path).
 
 **A run is `complete` only if nothing failed.** That includes reply threads
 and the `/player` call: if `--replies` asked for twenty threads and three
