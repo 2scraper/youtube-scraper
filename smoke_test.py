@@ -4076,6 +4076,50 @@ def check_a_column_the_player_response_omits_stays_null():
               (rows or [{}])[0].get("like_count"), None)
 
 
+# A capture can carry the capturing machine's address: YouTube signs a
+# playback URL with `&ip=<address>`, and three fixtures shipped one from
+# v0.1.0 to 2026-10-16. Any `ip=` parameter, and any IPv4 or IPv6 literal,
+# in a fixture or a sample output fails here.
+_IP_PARAM_RE = re.compile(r"(?i)(?:[?&]|%3F|%26)ip(?:=|%3D)")
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])"
+# Not after "/": "Chrome/129.0.0.0" is a version, not an address.
+_IPV4_RE = re.compile(r"(?<![0-9./])" + r"\.".join([_OCTET] * 4)
+                      + r"(?![0-9.])")
+_IPV6_RE = re.compile(r"(?i)(?<![0-9a-f:])(?:[0-9a-f]{1,4}:){4,7}"
+                      r"[0-9a-f]{1,4}(?![0-9a-f:])")
+
+
+def _ip_leaks(text):
+    return (_IP_PARAM_RE.findall(text) + _IPV4_RE.findall(text)
+            + _IPV6_RE.findall(text))
+
+
+def check_no_fixture_carries_an_ip_address():
+    for name, value in sorted(FIX.items()):
+        text = value if isinstance(value, str) else json.dumps(
+            value, ensure_ascii=False)
+        leaks = _ip_leaks(text)
+        check("fixture %s carries no ip= parameter or IP literal" % name,
+              not leaks, "found %d, e.g. %r" % (len(leaks), leaks[:2]))
+    for sample in ("sample_output.json", "sample_output.csv"):
+        path = os.path.join(REPO_ROOT, sample)
+        if os.path.exists(path):
+            leaks = _ip_leaks(open(path, encoding="utf-8").read())
+            check("%s carries no IP address" % sample, not leaks,
+                  "found %r" % leaks[:2])
+    # The guard is not blind: each planted shape is caught.
+    for planted in ("https://rr5---sn-x.googlevideo.com/initplayback?c=WEB"
+                    "&ip=" + ".".join(["203", "0", "113", "7"]) + "&mt=1",
+                    "initplayback%3Fid%3D1%26ip%3D2",
+                    "addr " + ":".join(["2001", "db8", "0", "0", "8a2e",
+                                        "370", "7334", "1"])):
+        check("the IP guard catches %r" % planted[:40],
+              bool(_ip_leaks(planted)))
+    for clean in ("1.827.082.109 Aufrufe", "2.20261015.01.00",
+                  "Chrome/129.0.0.0", "12:34"):
+        check("the IP guard leaves %r alone" % clean, not _ip_leaks(clean))
+
+
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")
           and callable(v) and k != "check"]
 

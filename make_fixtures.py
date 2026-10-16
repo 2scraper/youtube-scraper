@@ -493,6 +493,9 @@ def _trim(payload, keep: int):
                     "consistencyTokenJar"):
             context.pop(key, None)
     _drop_everywhere(data, "visitorData")
+    # A signed playback URL carrying the capturing machine's own IP address
+    # (`&ip=`). Nothing here reads it.
+    _drop_everywhere(data, "watchEndpointSupportedOnesieConfig")
     for key in ("thumbnail", "richThumbnail", "channelThumbnailSupportedRenderers",
                 "thumbnailOverlays", "menu", "expandableMetadata",
                 "inlinePlaybackEndpoint", "avatar"):
@@ -597,6 +600,9 @@ def _assert_clean(name, fixture, anon: _Anonymiser):
     pattern-based half, which catches a value this table never knew about.
     """
     text = json.dumps(fixture, ensure_ascii=False)
+    if re.search(r"(?i)[?&]ip(?:=|%3D)", text):
+        raise SystemExit(f"{name}: carries an `ip=` URL parameter. Nothing "
+                         f"is written.")
     leaked = sorted(o for o in anon.map if o and o in text)
     if leaked:
         raise SystemExit(
