@@ -11,6 +11,8 @@ rather than leaving it to be discovered from a bill or a chart.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-16
+
 > **A video row without its view count is now a parser failure.** A
 > `--mode video` row (any engine, and the Scraper API path) that comes out
 > of a served watch page without `video_id`, `title` or `view_count` used
@@ -423,6 +425,7 @@ timestamps, badges, the video and its publisher — is untouched. A comment
 is a person's writing, and republishing it is a separate act from YouTube
 showing it on its own page.
 
+[0.4.1]: https://github.com/2scraper/youtube-scraper/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.4.0
 [0.2.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.2.0
 [0.1.0]: https://github.com/2scraper/youtube-scraper/releases/tag/v0.1.0
