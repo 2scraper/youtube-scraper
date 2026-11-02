@@ -1,4 +1,4 @@
-# youtube-scraper
+# YouTube Scraper — Comments, Video Metadata and Search in Python
 
 [![release](https://img.shields.io/github/v/release/2scraper/youtube-scraper?sort=semver)](https://github.com/2scraper/youtube-scraper/releases)
 [![tests](https://github.com/2scraper/youtube-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/youtube-scraper/actions/workflows/tests.yml)
@@ -7,6 +7,8 @@
 [![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 [![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20Puppeteer-informational)](#engines)
 [![runs without an account](https://img.shields.io/badge/runs%20without-an%20account-success)](#do-you-need-any-of-this)
+
+**YouTube scraper** — an open-source (MIT) Python tool that reads YouTube comment threads and replies, video metadata and video search from the endpoint YouTube's own front end calls, and writes them to JSON or CSV over plain HTTPS, with no browser. Measured on 2026-09-21 from a bare datacentre address with no API key, no proxy and no account: 60 consecutive pages, 1,200 comments, zero refusals. Use it to build comment and sentiment datasets, or to compare two runs of the same video.
 
 YouTube comment threads and replies, video metadata, and video search —
 read from the endpoint YouTube's own front end calls.
@@ -442,3 +444,21 @@ end calls.
 
 MIT licensed. Not affiliated with, endorsed by, or connected to YouTube or
 Google.
+
+## Guides
+
+- [How to scrape YouTube: step-by-step guide](https://2captcha.com/h/how-to-scrape-youtube)
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Meta Ad Library scraper](https://github.com/2scraper/facebook-ads-scraper) — Every ad of a keyword or advertiser search in Meta's Ad…
+- [Facebook scraper](https://github.com/2scraper/facebook-pages-scraper) — Public Facebook Pages — contacts, followers, owner…
+- [Instagram scraper](https://github.com/2scraper/instagram-scraper) — Public profiles, posts and Reels, read logged out
+- [Snapchat scraper](https://github.com/2scraper/snapchat-scraper) — Public Snapchat profiles, Spotlight engagement and story…
+- [TikTok Ad Library scraper](https://github.com/2scraper/tiktok-ads-scraper) — Ads from TikTok's EU Ad Library
+- [TikTok Profile scraper](https://github.com/2scraper/tiktok-profile-scraper) — Exact follower, like and video counts, bio, verification…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
